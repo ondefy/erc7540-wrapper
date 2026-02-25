@@ -93,6 +93,8 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
     error SA__ExceededMaxRequestWithdraw(address owner, uint256 assets, uint256 maxAllowed);
     error SA__ExceededMaxRequestRedeem(address owner, uint256 shares, uint256 maxAllowed);
     error SA__NotClaimable(bytes32 withdrawKey);
+    error SA__NotAuthorized();
+    error SA__TotalAssetsUnderflow();
 
     /*//////////////////////////////////////////////////////////////
                              INTERNAL HOOKS
@@ -140,10 +142,12 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
      */
     function totalAssets() public view override(ERC4626Upgradeable, IERC4626) returns (uint256) {
         uint256 vaultBalance = IERC20(asset()).balanceOf(address(this));
-        (, uint256 assets) = (vaultBalance + allocatedAssets() + pendingDeallocationAssets()
-                + claimableFromStrategies())
-        .trySub(_outstandingObligations());
-        return assets;
+        uint256 gross = vaultBalance + allocatedAssets() + pendingDeallocationAssets() + claimableFromStrategies();
+        uint256 obligations = _outstandingObligations();
+        if (obligations > gross) revert SA__TotalAssetsUnderflow();
+        unchecked {
+            return gross - obligations;
+        }
     }
 
     /**
@@ -331,10 +335,15 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
 
         if (assetsToWithdraw > 0) _withdraw(_msgSender(), receiver, owner, assetsToWithdraw, sharesToRedeem);
 
-        if (assetsToRequest > 0) {
+        if (assetsToRequest > 0 && sharesToRequest > 0) {
             return _requestWithdraw(_msgSender(), controller, receiver, owner, assetsToRequest, sharesToRequest);
         }
         return bytes32(0);
+    }
+
+    /// @dev Returns true if `caller` is authorized to act on behalf of `controller`.
+    function _isAuthorized(address caller, address controller) internal view returns (bool) {
+        return caller == controller || isOperator(controller, caller);
     }
 
     /// @dev requestWithdraw/requestRedeem common workflow.
@@ -346,6 +355,9 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         uint256 assetsToRequest,
         uint256 sharesToRequest
     ) internal virtual returns (bytes32) {
+        // ERC-7540: caller must be controller or an approved operator of controller
+        if (!_isAuthorized(caller, controller)) revert SA__NotAuthorized();
+
         if (caller != owner) {
             _spendAllowance(owner, caller, sharesToRequest);
         }
@@ -397,6 +409,12 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
 
         SemiAsyncRedeemVaultStorage storage $ = _getSemiAsyncRedeemVaultStorage();
         WithdrawRequest storage request = $.withdrawRequests[withdrawKey];
+
+        // ERC-7540: restrict claim to receiver, controller, or operator of controller
+        address caller = _msgSender();
+        if (caller != request.receiver && !_isAuthorized(caller, request.controller)) {
+            revert SA__NotAuthorized();
+        }
 
         // Mark claimed first to prevent reentrancy drain
         request.isClaimed = true;

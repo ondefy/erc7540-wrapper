@@ -194,7 +194,10 @@ contract ERC7540ComplianceTest is Test {
 
         uint256 shares = vault.balanceOf(user) / 2;
 
-        // User approves themselves (caller == owner, no approval needed)
+        // ERC-7540: caller must be controller or operator of controller
+        vm.prank(controller);
+        vault.setOperator(user, true);
+
         vm.prank(user);
         uint256 requestId = vault.requestRedeem(shares, controller, user);
 
@@ -209,8 +212,11 @@ contract ERC7540ComplianceTest is Test {
         address spender = makeAddr("spender");
         uint256 shares = vault.balanceOf(user) / 4;
 
-        vm.prank(user);
+        vm.startPrank(user);
         vault.approve(spender, shares);
+        // ERC-7540: spender needs operator approval from controller (user)
+        vault.setOperator(spender, true);
+        vm.stopPrank();
 
         vm.prank(spender);
         uint256 requestId = vault.requestRedeem(shares, user, user);
@@ -290,6 +296,7 @@ contract ERC7540ComplianceTest is Test {
         uint256 requestId = vault.requestRedeem(shares, user, user);
 
         _processWithdrawRequest(vault.pendingWithdrawals());
+        vm.prank(user);
         vault.claim(bytes32(requestId));
 
         uint256 pending = vault.pendingRedeemRequest(requestId, user);
@@ -305,6 +312,7 @@ contract ERC7540ComplianceTest is Test {
         uint256 requestId = vault.requestRedeem(shares, user, user);
 
         _processWithdrawRequest(vault.pendingWithdrawals());
+        vm.prank(user);
         vault.claim(bytes32(requestId));
 
         uint256 claimable = vault.claimableRedeemRequest(requestId, user);
@@ -404,6 +412,7 @@ contract ERC7540ComplianceTest is Test {
         _processWithdrawRequest(vault.pendingWithdrawals());
 
         uint256 userBalanceBefore = asset.balanceOf(user);
+        vm.prank(user);
         vault.claim(bytes32(requestId));
 
         assertGt(asset.balanceOf(user), userBalanceBefore, "user should receive assets");
@@ -438,8 +447,9 @@ contract ERC7540ComplianceTest is Test {
         assertEq(vault.claimableRedeemRequest(requestId, user), request.requestedShares, "should be claimable");
         assertTrue(vault.isClaimable(bytes32(requestId)), "legacy isClaimable should be true");
 
-        // 5. Claim
+        // 5. Claim (must be called by controller/receiver)
         uint256 userBalanceBefore = asset.balanceOf(user);
+        vm.prank(user);
         vault.claim(bytes32(requestId));
 
         // 6. Verify claimed state
@@ -457,6 +467,12 @@ contract ERC7540ComplianceTest is Test {
 
         address controller1 = makeAddr("ctrl1");
         address controller2 = makeAddr("ctrl2");
+
+        // ERC-7540: user needs operator approval from each controller
+        vm.prank(controller1);
+        vault.setOperator(user, true);
+        vm.prank(controller2);
+        vault.setOperator(user, true);
 
         vm.startPrank(user);
         uint256 requestId1 = vault.requestRedeem(shares1, controller1, user);
@@ -515,7 +531,8 @@ contract ERC7540ComplianceTest is Test {
         assertEq(pending, 0, "should not be pending after fulfillment");
         assertGt(claimable, 0, "should be claimable after fulfillment");
 
-        // Claim
+        // Claim (must be called by controller/receiver)
+        vm.prank(user);
         vault.claim(bytes32(requestId));
 
         // Zeroed state

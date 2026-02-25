@@ -126,6 +126,7 @@ contract SmartAccountWrapperTest is Test {
         _assertAssetStates(0, 0, MAX_AMOUNT - amount, MAX_AMOUNT - amount);
         assertEq(smartAccountWrapper.isClaimable(withdrawKey), true, "claimable");
         uint256 userBalanceBefore = asset.balanceOf(user);
+        vm.prank(user);
         smartAccountWrapper.claim(withdrawKey);
         assertEq(asset.balanceOf(user), userBalanceBefore + amount, "user balance is not the expected value");
     }
@@ -140,6 +141,7 @@ contract SmartAccountWrapperTest is Test {
         _assertAssetStates(1, 0, MAX_AMOUNT - amount - overflowAmount, MAX_AMOUNT - amount);
         assertEq(smartAccountWrapper.isClaimable(withdrawKey), true, "claimable");
         uint256 userBalanceBefore = asset.balanceOf(user);
+        vm.prank(user);
         smartAccountWrapper.claim(withdrawKey);
         assertEq(asset.balanceOf(user), userBalanceBefore + amount, "user balance is not the expected value");
     }
@@ -329,6 +331,7 @@ contract SmartAccountWrapperTest is Test {
         assertEq(smartAccountWrapper.isClaimed(withdrawKey), false);
         _processWithdrawRequest(requestAmount);
         assertEq(smartAccountWrapper.isClaimable(withdrawKey), true);
+        vm.prank(user);
         smartAccountWrapper.claim(withdrawKey);
         assertEq(smartAccountWrapper.isClaimed(withdrawKey), true);
     }
@@ -477,6 +480,7 @@ contract SmartAccountWrapperTest is Test {
         _processWithdrawRequest(requestAmount);
 
         uint256 userBalanceBefore = asset.balanceOf(user);
+        vm.prank(user);
         smartAccountWrapper.claim(withdrawKey);
         assertEq(asset.balanceOf(user), userBalanceBefore + requestAmount);
         assertEq(smartAccountWrapper.isClaimed(withdrawKey), true);
@@ -510,6 +514,8 @@ contract SmartAccountWrapperTest is Test {
 
         vm.startPrank(user);
         smartAccountWrapper.approve(spender, requestAmount);
+        // ERC-7540: spender also needs operator approval from the controller (user)
+        smartAccountWrapper.setOperator(spender, true);
         vm.stopPrank();
 
         vm.startPrank(spender);

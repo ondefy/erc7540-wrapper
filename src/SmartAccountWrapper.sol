@@ -6,8 +6,10 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {IERC7540Redeem, IERC7540Operator} from "forge-std/interfaces/IERC7540.sol";
 
 import {SemiAsyncRedeemVault} from "./SemiAsyncRedeemVault.sol";
 
@@ -32,6 +34,17 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
     error SA__NotEnoughIdleAssets(uint256 assets, uint256 idleAssets);
     error SA__PendingWithdrawals();
     error SA__ExceededMaxDeviationRate();
+    error SA__DeallocatedAssetsExceedAllocated(uint256 remaining, uint256 allocated);
+    error SA__ZeroAddress();
+
+    /*//////////////////////////////////////////////////////////////
+                                EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    event AllocatedAssetsTransmitted(uint256 newAllocatedAssets);
+    event DeallocatedAssetsTransmitted(uint256 remainingAllocatedAssets);
+    event AssetsAllocated(uint256 assets);
+    event SmartAccountSet(address smartAccount);
 
     /*//////////////////////////////////////////////////////////////
                         NAMESPACED STORAGE LAYOUT
@@ -80,10 +93,6 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
         _getSmartAccountWrapperStorage().smartAccount = smartAccount_;
     }
 
-    function reinitialize(address owner_) public reinitializer(2) {
-        __Ownable_init(owner_);
-    }
-
     function allocatedAssets() public view override returns (uint256) {
         return _getSmartAccountWrapperStorage().allocatedAssets;
     }
@@ -120,10 +129,15 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
     function forceTransmitAllocatedAssets(uint256 assets) public onlyOwner {
         if (pendingWithdrawals() > 0) revert SA__PendingWithdrawals();
         _getSmartAccountWrapperStorage().allocatedAssets = assets;
+        emit AllocatedAssetsTransmitted(assets);
     }
 
     function forceTransmitDeallocatedAssets(uint256 remainingAllocatedAssets) public onlyOwner {
+        if (remainingAllocatedAssets > allocatedAssets() && pendingWithdrawals() > 0) {
+            revert SA__PendingWithdrawals();
+        }
         _getSmartAccountWrapperStorage().allocatedAssets = remainingAllocatedAssets;
+        emit DeallocatedAssetsTransmitted(remainingAllocatedAssets);
     }
 
     function _checkMaxDeviationRate(uint256 assets) internal view {
@@ -140,20 +154,29 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
         if (pendingWithdrawals() > 0) revert SA__PendingWithdrawals();
         _checkMaxDeviationRate(assets);
         _getSmartAccountWrapperStorage().allocatedAssets = assets;
+        emit AllocatedAssetsTransmitted(assets);
     }
 
     function transmitDeallocatedAssets(uint256 remainingAllocatedAssets) public onlySmartAccount {
+        uint256 current = allocatedAssets();
+        if (remainingAllocatedAssets > current) {
+            revert SA__DeallocatedAssetsExceedAllocated(remainingAllocatedAssets, current);
+        }
         _getSmartAccountWrapperStorage().allocatedAssets = remainingAllocatedAssets;
+        emit DeallocatedAssetsTransmitted(remainingAllocatedAssets);
     }
 
     function allocateAssets(uint256 assets) public onlyOwner {
-        uint256 idleAssets = idleAssets();
-        if (assets > idleAssets) revert SA__NotEnoughIdleAssets(assets, idleAssets);
+        uint256 idle = idleAssets();
+        if (assets > idle) revert SA__NotEnoughIdleAssets(assets, idle);
         _transferToSmartAccount(assets);
+        emit AssetsAllocated(assets);
     }
 
     function setSmartAccount(address smartAccount_) public onlyOwner {
+        if (smartAccount_ == address(0)) revert SA__ZeroAddress();
         _getSmartAccountWrapperStorage().smartAccount = smartAccount_;
+        emit SmartAccountSet(smartAccount_);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -183,5 +206,14 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
             return ERC1271_MAGIC_VALUE;
         }
         return ERC1271_INVALID;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            ERC-165 LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IERC7540Redeem).interfaceId
+            || interfaceId == type(IERC7540Operator).interfaceId;
     }
 }

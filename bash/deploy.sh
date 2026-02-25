@@ -20,7 +20,7 @@ else
 fi
 
 # Validate required variables
-REQUIRED_VARS="PRIVATE_KEY DEPLOY_SALT OWNER OPERATOR SMART_ACCOUNT UNDERLYING_TOKEN VAULT_NAME VAULT_SYMBOL"
+REQUIRED_VARS="PRIVATE_KEY DEPLOY_SALT OWNER SMART_ACCOUNT UNDERLYING_TOKEN VAULT_NAME VAULT_SYMBOL"
 for var in $REQUIRED_VARS; do
     if [ -z "${!var}" ]; then
         echo "Error: $var not set in .env"
@@ -39,7 +39,6 @@ echo "Salt:             $DEPLOY_SALT"
 echo ""
 echo "Parameters:"
 echo "  Owner:            $OWNER"
-echo "  Operator:         $OPERATOR"
 echo "  Smart Account:    $SMART_ACCOUNT"
 echo "  Underlying Token: $UNDERLYING_TOKEN"
 echo "  Vault Name:       $VAULT_NAME"
