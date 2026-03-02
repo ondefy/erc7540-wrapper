@@ -1,298 +1,463 @@
-# Semi-Async-Vault Architecture Documentation
+# Semi-Async Vault — Architecture Documentation
 
-## 1. Architecture Overview
+> **Audience**: Security auditors and integrators.
+> This document describes the high-level design, trust model, and operational flows of the Semi-Async Vault system. It is not a line-by-line code walkthrough.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           LOGARITHM ACP AGENT (Python Backend)                  │
-│  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │                      SmartWrapperOperator (PollingRunner)                │   │
-│  │  • Monitors pendingWithdrawals() and idleAssets()                       │   │
-│  │  • Calls transmitAllocatedAssets() to sync PnL                          │   │
-│  │  • Calls transmitDeallocatedAssets() to fulfill withdrawals             │   │
-│  │  • Calls allocateAssets() to deploy new deposits                        │   │
-│  └───────────────────────────────┬─────────────────────────────────────────┘   │
-│                                  │                                              │
-│  ┌───────────────────────────────▼─────────────────────────────────────────┐   │
-│  │                    SmartWrapper (Python Contract Interface)              │   │
-│  │  • transmit_allocated_assets(assets) → transmitAllocatedAssets()        │   │
-│  │  • transmit_deallocated_assets(dealloc, remaining)                      │   │
-│  │  • allocate_assets(assets) → allocateAssets()                           │   │
-│  │  • get_idle_assets() / get_pending_withdrawals() / get_allocated_assets()│   │
-│  └───────────────────────────────┬─────────────────────────────────────────┘   │
-└──────────────────────────────────┼──────────────────────────────────────────────┘
-                                   │ Web3 RPC Calls
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    SEMI-ASYNC-VAULT (Solidity Smart Contracts)                  │
-│                                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │              SmartAccountWrapper (extends SemiAsyncRedeemVault)         │   │
-│  │                                                                         │   │
-│  │   ROLES:                                                                │   │
-│  │   └── owner: Admin controls (forceTransmit*, allocate*, setSmartAccount)│   │
-│  │                                                                         │   │
-│  │   STORAGE:                                                              │   │
-│  │   ├── smartAccount: External address holding allocated assets           │   │
-│  │   └── allocatedAssets: uint256 tracking deployed capital               │   │
-│  └─────────────────────────────────┬───────────────────────────────────────┘   │
-│                                    │ inherits                                   │
-│  ┌─────────────────────────────────▼───────────────────────────────────────┐   │
-│  │               SemiAsyncRedeemVault (abstract, extends ERC4626)          │   │
-│  │                                                                         │   │
-│  │   USER FUNCTIONS:                                                       │   │
-│  │   ├── deposit() / withdraw() → Standard ERC4626                         │   │
-│  │   ├── requestWithdraw(assets, receiver, owner) → bytes32 withdrawKey    │   │
-│  │   ├── requestRedeem(shares, receiver, owner) → bytes32 withdrawKey      │   │
-│  │   └── claim(withdrawKey) → Claim fulfilled request                      │   │
-│  │                                                                         │   │
-│  │   ASSET STATES:                                                         │   │
-│  │   ├── idleAssets(): Available for immediate withdrawal                  │   │
-│  │   ├── allocatedAssets(): Deployed in strategies                         │   │
-│  │   ├── pendingWithdrawals(): User requests awaiting fulfillment          │   │
-│  │   └── totalAssets(): idleAssets + allocatedAssets - pendingWithdrawals  │   │
-│  └─────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │                SmartAccountProxy (BeaconProxy)                          │   │
-│  │   • Upgradeable proxy pattern using OpenZeppelin Beacon                 │   │
-│  └─────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                   │ Asset Transfer
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           EXTERNAL SMART ACCOUNT (Zyfai)                        │
-│  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │                         Zyfai Smart Account                             │   │
-│  │   • Holds actual USDC allocated from wrapper                            │   │
-│  │   • Executes yield strategies (external DeFi protocols)                 │   │
-│  │   • request_withdraw(amount, recipient) → Returns assets to operator    │   │
-│  │   • get_balance() → Current asset balance in account                    │   │
-│  └─────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────┘
+---
+
+## Table of Contents
+
+1. [System Overview](#1-system-overview)
+2. [Roles & Trust Model](#2-roles--trust-model)
+3. [Asset States](#3-asset-states)
+4. [Deposit Flow](#4-deposit-flow)
+5. [Withdrawal Flow](#5-withdrawal-flow)
+6. [Indexer Loop](#6-indexer-loop)
+7. [Claim Flow](#7-claim-flow)
+8. [PnL Synchronization](#8-pnl-synchronization)
+9. [ERC-7540 Operator System](#9-erc-7540-operator-system)
+10. [Upgrade & Deployment Architecture](#10-upgrade--deployment-architecture)
+11. [Key Invariants](#11-key-invariants)
+12. [Known Tradeoffs & Assumptions](#12-known-tradeoffs--assumptions)
+13. [Contract Reference](#13-contract-reference)
+
+---
+
+## 1. System Overview
+
+The Semi-Async Vault is an **ERC-7540 compliant async redemption vault** that wraps a Zyfai smart account. It allows users to deposit ERC-20 tokens (one token per vault deployment) and earn yield generated by multiple DeFi strategies executed inside the Zyfai smart account.
+
+**Key properties:**
+
+- Deposits are **synchronous** — assets are immediately forwarded to the Zyfai smart account.
+- Withdrawals are **asynchronous** — queued for async fulfillment.
+- The vault is the **sole owner** of the Zyfai smart account, giving it full custody of allocated assets.
+- A **centralized indexer** manages withdrawal fulfillment, idle asset allocation, and PnL synchronization.
+- The vault is **ERC-4626 backward compatible** for standard integrations.
+
+```mermaid
+graph TB
+    subgraph Users
+        U1[Depositor]
+        U2[Withdrawer]
+    end
+
+    subgraph Indexer
+        BE[SmartWrapperOperator<br/>Centralized Service]
+    end
+
+    subgraph "On-Chain Contracts"
+        VAULT[SmartAccountWrapper<br/>ERC-7540 Vault]
+    end
+
+    subgraph "Zyfai Smart Account"
+        SA[Zyfai Smart Account]
+    end
+
+    U1 -->|deposit| VAULT
+    U2 -->|requestWithdraw / claim| VAULT
+    BE -->|"fulfill withdrawals,<br/>allocate idle"| VAULT
+    VAULT -->|"assets transferred"| SA
+    SA -->|"assets returned"| VAULT
+
+    style VAULT fill:#e1f5fe
+    style SA fill:#fff3e0
+    style BE fill:#f3e5f5
 ```
 
 ---
 
-## 2. Contract Functions Reference
+## 2. Roles & Trust Model
 
-### 2.1 SemiAsyncRedeemVault (Abstract Base)
+```mermaid
+graph LR
+    subgraph "High Trust"
+        OWNER["Owner (Gnosis Safe Multisig)<br/>──────────<br/>• forceTransmit*<br/>• allocateAssets<br/>• setSmartAccount<br/>• upgrade beacon"]
+    end
 
-| Function | Visibility | Purpose |
-|----------|------------|---------|
-| **User Actions** |||
-| `requestWithdraw(assets, receiver, owner)` | public | Request withdrawal; immediately fulfills from idle assets, queues remainder |
-| `requestRedeem(shares, receiver, owner)` | public | Same as above but denominated in shares |
-| `claim(withdrawKey)` | public | Claim assets from a fulfilled withdrawal request |
-| `isClaimable(withdrawKey)` | view | Check if request can be claimed |
-| `isClaimed(withdrawKey)` | view | Check if request was already claimed |
-| **Views** |||
-| `idleAssets()` | view | Assets immediately available (vault balance + claimable - obligations) |
-| `pendingWithdrawals()` | view | Total unfulfilled user withdrawal requests |
-| `allocatedAssets()` | view (virtual) | Assets deployed in external strategies |
-| `totalAssets()` | view | Net asset value (idle + allocated - pending) |
-| `maxWithdraw(owner)` | view | Min(user's assets, idle assets) |
-| `maxRequestWithdraw(owner)` | view | User's total withdrawable assets |
-| **Helpers** |||
-| `cumulativeRequestedWithdrawalAssets()` | view | Lifetime total of requested withdrawals |
-| `cumulativeClaimedAssets()` | view | Lifetime total of claimed assets |
-| `getWithdrawKey(user, nonce)` | view | Compute withdrawal request identifier |
+    subgraph "Medium Trust"
+        SA_ROLE["Smart Account (Zyfai)<br/>──────────<br/>• transmitAllocatedAssets<br/>• transmitDeallocatedAssets"]
+        INDEXER["Indexer<br/>──────────<br/>• Fulfills withdrawal requests<br/>• Deploys idle assets<br/>• Syncs NAV"]
+    end
 
-### 2.2 SmartAccountWrapper (Concrete Implementation)
+    subgraph "No Trust Required"
+        USER["User<br/>──────────<br/>• deposit / withdraw<br/>• requestWithdraw / requestRedeem<br/>• claim<br/>• setOperator"]
+        OPERATOR["ERC-7540 Operator<br/>──────────<br/>• Act on behalf of controller<br/>(requires explicit approval)"]
+    end
 
-| Function | Visibility | Modifier | Purpose |
-|----------|------------|----------|---------|
-| **Initialization** ||||
-| `initialize(owner, smartAccount, token, name, symbol)` | public | initializer | Setup wrapper with owner and asset |
-| `reinitialize(owner)` | public | reinitializer(2) | Upgrade re-initialization |
-| **Smart Account Functions** ||||
-| `transmitAllocatedAssets(assets)` | public | onlySmartAccount | Sync PnL: update `allocatedAssets` to match smart account balance |
-| `transmitDeallocatedAssets(remaining)` | public | onlySmartAccount | Fulfill withdrawals: update accounting after deallocation |
-| **Owner Functions** ||||
-| `allocateAssets(assets)` | public | onlyOwner | Deploy idle assets to smart account |
-| `setSmartAccount(address)` | public | onlyOwner | Update smart account address |
-| `forceTransmitAllocatedAssets(assets)` | public | onlyOwner | Emergency PnL sync (bypasses deviation check) |
-| `forceTransmitDeallocatedAssets(remaining)` | public | onlyOwner | Emergency withdrawal fulfillment |
-| **Views** ||||
-| `smartAccount()` | view | - | Address holding allocated assets |
-| `pendingDeallocationAssets()` | pure | - | Always 0 (no async strategy unwinding) |
-| `claimableFromStrategies()` | pure | - | Always 0 (no pending claims from strategies) |
+    OWNER -->|controls| SA_ROLE
+    OWNER -->|controls| INDEXER
+    INDEXER -->|calls| SA_ROLE
+    USER -->|approves| OPERATOR
+
+    style OWNER fill:#ffcdd2
+    style SA_ROLE fill:#fff9c4
+    style INDEXER fill:#fff9c4
+    style USER fill:#c8e6c9
+    style OPERATOR fill:#c8e6c9
+```
+
+**Trust assumptions:**
+
+- **Owner** is a Gnosis Safe multisig. It has full control: can upgrade the vault and reallocate assets. There is **no timelock** on upgrades — the multisig threshold is the sole protection. Users accept this as part of the trust model.
+- **Smart Account** can update `allocatedAssets` via `transmitAllocatedAssets()`.
+- **Indexer** is a centralized service. It is the sole mechanism for fulfilling async withdrawals and syncing NAV.
+- **Users** interact permissionlessly. They can deposit, request withdrawals, and claim fulfilled requests.
+- **ERC-7540 Operators** are approved per-controller for composability (e.g., aggregators, routers acting on behalf of depositors).
 
 ---
 
-## 3. Asset Flow Lifecycle
+## 3. Asset States
 
-### 3.1 Deposit Flow
-```
-User → deposit(assets, receiver)
-       │
-       ├── ERC4626._deposit() mints shares
-       ├── SmartAccountWrapper._deposit() calls _transferToSmartAccount(assets)
-       │       └── allocatedAssets += assets
-       │       └── asset.safeTransfer(smartAccount, assets)
-       │
-       └── Assets now in Zyfai Smart Account
-```
+The vault tracks assets in distinct states with a critical mutual exclusivity invariant:
 
-### 3.2 Withdrawal Flow (Immediate Path)
-```
-User → requestWithdraw(assets, receiver, owner)
-       │
-       ├── Check: idleAssets() >= assets?
-       │       └── YES: Immediately transfer, return bytes32(0)
-       │
-       └── Result: User receives assets, no pending request created
+```mermaid
+graph TB
+    subgraph "Vault Total Assets"
+        IDLE["Idle Assets<br/>──────────<br/>Vault's on-hand balance<br/>minus pending obligations<br/><i>Available for instant withdrawal</i>"]
+        ALLOC["Allocated Assets<br/>──────────<br/>Deployed in Zyfai<br/>smart account strategies<br/><i>Tracked via allocatedAssets variable</i>"]
+        PENDING["Pending Withdrawals<br/>──────────<br/>User requests awaiting<br/>async fulfillment<br/><i>Cumulative minus claimed</i>"]
+    end
+
+    IDLE -.-|"MUTUAL EXCLUSION<br/>idle > 0 XOR pending > 0<br/>never both positive"| PENDING
+
+    style IDLE fill:#c8e6c9
+    style ALLOC fill:#fff9c4
+    style PENDING fill:#ffcdd2
 ```
 
-### 3.3 Withdrawal Flow (Async Path)
-```
-User → requestWithdraw(assets, receiver, owner)
-       │
-       ├── Check: idleAssets() >= assets?
-       │       └── NO: Create WithdrawRequest, burn shares
-       │
-       └── pendingWithdrawals() increases by (assets - idleAssets)
+**`totalAssets()` = idle + allocated**
+_(pending withdrawals are subtracted because those shares are already burned)_
 
-═══════════════════════════════════════════════════════════════════════
-
-Backend Polling Loop (SmartWrapperOperator):
-       │
-       ├── Detect: pendingWithdrawals() > 0
-       ├── Call: smart_account.request_withdraw(amount, operator)
-       ├── Wait: Assets arrive at operator's wallet
-       └── Call: transmitDeallocatedAssets(deallocated, remaining)
-               │
-               ├── allocatedAssets = remaining
-               └── asset.safeTransferFrom(operator, wrapper, deallocated)
-
-═══════════════════════════════════════════════════════════════════════
-
-User → claim(withdrawKey)
-       │
-       ├── Check: isClaimable(withdrawKey)
-       │       └── cumulativeClaimedAssets + vaultBalance >= request.cumulative
-       └── Transfer assets to receiver
-```
+**How idle assets arise:** Idle only accumulates when the indexer deallocates more assets from the smart account than the current pending withdrawal obligations (deallocation overflow). Under normal operation, 100% of deposited assets are immediately allocated to the smart account — there is no configurable reserve buffer.
 
 ---
 
-## 4. Backend Integration Details
+## 4. Deposit Flow
 
-### 4.1 SmartWrapper Python Class
+Deposits are fully synchronous. The user calls `deposit()` directly on the vault contract. Inside the deposit transaction, `transmitAllocatedAssets()` is called to sync the current NAV before minting shares. After the deposit, the Zyfai smart account asynchronously detects the incoming assets and incorporates them into its active strategies.
 
-Location: `logarithm-acp-agent/contracts/smart_wrapper.py`
+```mermaid
+sequenceDiagram
+    actor User
+    participant Vault as SmartAccountWrapper
+    participant SA as Zyfai Smart Account
 
-```python
-class SmartWrapper(Vault):
-    """Python interface to SmartAccountWrapper contract"""
+    User->>Vault: deposit(assets, receiver)
 
-    def __init__(self, chain_manager, address, operator_private_key, asset_decimals=6):
-        # Inherits from Vault which extends Token → SmartContract
-        self.smart_account = self.call_contract("smartAccount")
-        self.operator = self.call_contract("operator")
+    rect rgb(240, 248, 255)
+        Note over Vault: Inside deposit() execution
+        Vault->>Vault: transmitAllocatedAssets(currentBalance)
+        Note right of Vault: NAV synced — share price is fresh
+        Vault->>Vault: Mint shares to receiver<br/>shares = assets × totalSupply / totalAssets
+        Vault->>SA: safeTransfer(assets)
+        Vault->>Vault: allocatedAssets += assets
+    end
 
-    # === OPERATOR WRITE FUNCTIONS ===
-    def transmit_allocated_assets(self, assets: Decimal) -> TransactionResult:
-        """Sync allocatedAssets to match smart account balance (PnL update)"""
-
-    def transmit_deallocated_assets(self, deallocated: Decimal, remaining: Decimal) -> TransactionResult:
-        """Pull deallocated assets from operator wallet to fulfill withdrawals"""
-
-    def allocate_assets(self, assets: Decimal) -> TransactionResult:
-        """Deploy idle vault assets to the smart account"""
-
-    # === READ FUNCTIONS ===
-    def get_idle_assets(self) -> Decimal
-    def get_pending_withdrawals(self) -> Decimal
-    def get_allocated_assets(self) -> Decimal
+    Note over SA: Zyfai detects deposit<br/>asynchronously and deploys<br/>into active strategies
 ```
 
-### 4.2 SmartWrapperOperator Polling Logic
+**Key details:**
 
-Location: `logarithm-acp-agent/acp_agents/smart_wrapper_operator.py`
-
-The operator runs a continuous polling loop with these responsibilities:
-
-1. **PnL Synchronization** (`_transmit_allocated_assets_if_needed`)
-   - Compare `wrapper.allocatedAssets` vs `smart_account.balance`
-   - If difference exists AND < 0.25% deviation → call `transmitAllocatedAssets()`
-   - If deviation > 0.25% → alert via Telegram, require manual intervention
-
-2. **Withdrawal Processing** (`_handle_pending_withdrawals`)
-   - Detect `pendingWithdrawals() > 0`
-   - Request withdrawal from Zyfai smart account
-   - Once assets arrive → call `transmitDeallocatedAssets()`
-
-3. **Idle Asset Deployment** (`_allocate_idle_assets`)
-   - If `idleAssets() > 0` → call `allocateAssets()` to deploy to strategy
+- 100% of deposited assets are transferred to the smart account immediately — nothing remains idle.
+- Share minting follows the standard ERC-4626 exchange rate formula.
+- NAV is synced within the deposit call itself, ensuring the user receives shares at a fair price.
 
 ---
 
-## 5. Security Model
+## 5. Withdrawal Flow
 
-### 5.1 Access Control
+Withdrawals follow a hybrid model: immediate if idle liquidity is sufficient, otherwise queued for async fulfillment.
 
-| Role | Capabilities |
-|------|-------------|
-| **User** | deposit, withdraw (up to idle), requestWithdraw, claim |
-| **Smart Account** | transmitAllocatedAssets (with 0.25% deviation limit), transmitDeallocatedAssets |
-| **Owner** | allocateAssets, setSmartAccount, forceTransmit* (no deviation limit), contract upgrades |
+```mermaid
+flowchart TD
+    START([User calls requestWithdraw / requestRedeem])
+    START --> CONVERT{requestRedeem?}
+    CONVERT -->|Yes| SHARES_TO_ASSETS[Convert shares → assets]
+    CONVERT -->|No| CHECK_IDLE
+    SHARES_TO_ASSETS --> CHECK_IDLE
 
-### 5.2 Deviation Protection
+    CHECK_IDLE{idleAssets >= requested?}
+
+    CHECK_IDLE -->|"Yes (Full Idle Coverage)"| IMMEDIATE
+    CHECK_IDLE -->|"Partial Idle Available"| SPLIT
+    CHECK_IDLE -->|"No Idle (Typical Case)"| FULL_ASYNC
+
+    subgraph "Immediate Path"
+        IMMEDIATE[Transfer assets immediately<br/>Return bytes32 0 — no request created]
+    end
+
+    subgraph "Split Path"
+        SPLIT[Immediately transfer idle portion]
+        SPLIT --> QUEUE_REMAINDER[Queue remaining as async request]
+    end
+
+    subgraph "Async Path (Most Common)"
+        FULL_ASYNC[Queue entire amount as async request]
+    end
+
+    QUEUE_REMAINDER --> CREATE_REQUEST
+    FULL_ASYNC --> CREATE_REQUEST
+
+    CREATE_REQUEST["Create WithdrawRequest:<br/>• Burn user's shares<br/>• Generate withdrawKey = keccak256(vault, owner, nonce)<br/>• Increment cumulativeRequestedWithdrawalAssets<br/>• Emit RedeemRequest event"]
+
+    CREATE_REQUEST --> WAIT([Request enters FIFO queue<br/>Awaiting indexer fulfillment])
+
+    style IMMEDIATE fill:#c8e6c9
+    style SPLIT fill:#fff9c4
+    style FULL_ASYNC fill:#ffcdd2
+    style WAIT fill:#e1f5fe
+```
+
+**Key details:**
+
+- Since 100% of assets are allocated, **most withdrawals go through the async path**.
+- Users can have **multiple pending requests** simultaneously (each gets a unique `withdrawKey` via incrementing nonce).
+- Shares are **burned at request time**, not at claim time. This locks in the exchange rate.
+- The `withdrawKey` is computed as `keccak256(abi.encode(vault, owner, nonce))`.
+
+---
+
+## 6. Indexer Loop
+
+The centralized indexer runs a continuous polling loop that manages three responsibilities:
+
+```mermaid
+sequenceDiagram
+    participant Indexer as Indexer<br/>(SmartWrapperOperator)
+    participant Vault as SmartAccountWrapper
+    participant SA as Zyfai Smart Account
+
+    loop Polling Loop
+        Note over Indexer: === 1. Check Pending Withdrawals ===
+        Indexer->>Vault: pendingWithdrawals()
+        alt pendingWithdrawals > 0
+            Indexer->>SA: request_withdraw(amount)
+            SA-->>Indexer: Assets arrive at operator wallet
+            Indexer->>Vault: transmitDeallocatedAssets(remainingAllocated)
+            Note right of Vault: allocatedAssets = remaining<br/>Vault balance increases<br/>Requests become claimable
+        end
+
+        Note over Indexer: === 2. Check Idle Assets ===
+        Indexer->>Vault: idleAssets()
+        alt idleAssets > 0 (deallocation overflow)
+            Indexer->>Vault: allocateAssets(idleAmount)
+            Vault->>SA: safeTransfer(idleAmount)
+            Note right of Vault: allocatedAssets += idleAmount<br/>Idle returns to zero
+        end
+
+        Note over Indexer: === 3. PnL Sync ===
+        Indexer->>SA: get_balance()
+        SA-->>Indexer: currentBalance
+        Indexer->>Vault: transmitAllocatedAssets(currentBalance)
+        Note right of Vault: allocatedAssets updated<br/>Share price reflects latest PnL
+    end
+```
+
+**Withdrawal fulfillment latency** depends on how quickly the smart account can unwind strategy positions. There is **no timeout or emergency withdrawal path** — if the indexer goes offline, users must wait for it to resume.
+
+---
+
+## 7. Claim Flow
+
+After the indexer fulfills withdrawal requests, users must claim their assets. Claims follow **strict FIFO ordering**.
+
+```mermaid
+flowchart TD
+    START([User calls claim with withdrawKey])
+
+    START --> CHECK_CLAIMED{Already claimed?}
+    CHECK_CLAIMED -->|Yes| REVERT_CLAIMED[Revert: already claimed]
+
+    CHECK_CLAIMED -->|No| CHECK_CLAIMABLE{"isClaimable(withdrawKey)?<br/>──────────<br/>cumulativeClaimed + vaultBalance<br/>>= request.cumulativeRequested"}
+
+    CHECK_CLAIMABLE -->|No| REVERT_NOT_CLAIMABLE["Revert: not claimable yet<br/>(earlier FIFO requests not yet fulfilled)"]
+
+    CHECK_CLAIMABLE -->|Yes| MARK["Mark isClaimed = true<br/>(reentrancy guard: state change BEFORE transfer)"]
+
+    MARK --> TRANSFER["safeTransfer(receiver, requestedAssets)<br/>Update cumulativeClaimedAssets"]
+
+    TRANSFER --> DONE([Assets delivered to receiver])
+
+    style REVERT_CLAIMED fill:#ffcdd2
+    style REVERT_NOT_CLAIMABLE fill:#ffcdd2
+    style DONE fill:#c8e6c9
+```
+
+**FIFO enforcement:** A request is only claimable when all **prior** requests (by cumulative index) can also be satisfied. This means:
+
+- Request #1 must be claimable before request #2.
+- A large whale request can block smaller requests behind it until fully funded.
+- This is an accepted tradeoff — there is no max request size or fairness splitting.
+
+---
+
+## 8. PnL Synchronization
+
+The vault does not directly observe yield accrual. Instead, the smart account reports its current balance, and the vault updates `allocatedAssets` accordingly.
+
+```mermaid
+flowchart TD
+    SA_REPORT["Smart account / indexer reports<br/>currentBalance"]
+    SA_REPORT --> UPDATE["transmitAllocatedAssets(currentBalance)<br/>──────────<br/>allocatedAssets = currentBalance<br/>Share price updated"]
+
+    subgraph "Emergency Override (Owner Only)"
+        FORCE["forceTransmitAllocatedAssets(assets)<br/>──────────<br/>Used in hack recovery / migration"]
+    end
+
+    style UPDATE fill:#c8e6c9
+    style FORCE fill:#fff9c4
+```
+
+**Important constraint:** `transmitAllocatedAssets()` **cannot** be called while there are pending withdrawals (`pendingWithdrawals > 0`). This prevents share price manipulation during the withdrawal settlement window.
+
+---
+
+## 9. ERC-7540 Operator System
+
+The vault implements the ERC-7540 operator standard for composability. Operators are third-party smart contracts (aggregators, routers, yield optimizers) that can act on behalf of a user (controller).
+
+```mermaid
+sequenceDiagram
+    actor User as User (Controller)
+    participant Router as Aggregator / Router<br/>(Operator)
+    participant Vault as SmartAccountWrapper
+
+    User->>Vault: setOperator(routerAddress, true)
+    Note right of Vault: operators[user][router] = true
+
+    Note over User,Router: Later, router acts on user's behalf:
+
+    Router->>Vault: requestRedeem(shares, receiver, user)
+    Vault->>Vault: Verify: isOperator(user, router) == true
+    Vault->>Vault: Process request as if user called it
+```
+
+**Key details:**
+
+- Operators are approved **per-controller** — approving an operator for your address does not affect other users.
+- Operators can call `requestRedeem()` and `requestWithdraw()` on behalf of controllers.
+- This enables other protocols to build on top of the vault without requiring users to move assets through intermediate contracts.
+
+---
+
+## 10. Upgrade & Deployment Architecture
+
+### Proxy Pattern
+
+The vault uses OpenZeppelin's **Beacon Proxy** pattern with **CREATE3** for deterministic cross-chain addresses.
+
+```mermaid
+graph TB
+    subgraph "Deployment (Same Addresses Across Chains)"
+        CREATE3["CREATE3 Factory<br/>──────────<br/>Deterministic addresses<br/>from deployer + salt"]
+    end
+
+    subgraph "Proxy Architecture"
+        BEACON["UpgradeableBeacon<br/>──────────<br/>Stores implementation address<br/>Owner can upgrade"]
+        IMPL_V1["SmartAccountWrapper v1<br/>(Implementation)"]
+        IMPL_V2["SmartAccountWrapper v2<br/>(Future Upgrade)"]
+        PROXY["SmartAccountProxy<br/>(BeaconProxy)<br/>──────────<br/>User-facing address<br/>Delegates to beacon's impl"]
+    end
+
+    CREATE3 -->|deploys| BEACON
+    CREATE3 -->|deploys| PROXY
+    CREATE3 -->|deploys| IMPL_V1
+
+    BEACON -->|"points to"| IMPL_V1
+    BEACON -.->|"after upgrade"| IMPL_V2
+    PROXY -->|"delegatecall via beacon"| IMPL_V1
+
+    style PROXY fill:#e1f5fe
+    style BEACON fill:#fff9c4
+    style CREATE3 fill:#f3e5f5
+```
+
+### Upgrade Process
+
+1. Deploy new `SmartAccountWrapper` implementation contract.
+2. Owner (Safe multisig) calls `UpgradeableBeacon.upgradeTo(newImpl)`.
+3. All proxies instantly route to the new implementation.
+4. Optionally call `reinitialize()` if new storage variables are introduced.
+
+**No timelock exists** on the upgrade path. The multisig threshold is the sole protection against malicious upgrades. This is an accepted trust assumption.
+
+### Storage Layout
+
+Both contracts use **ERC-7201 namespaced storage** to prevent storage collisions during upgrades:
+
+- `SmartAccountWrapper` storage at slot `0x0b4df025...`
+- `SemiAsyncRedeemVault` storage at slot `0x642da267...`
+
+### ERC-1271 Signature Validation
+
+The vault implements ERC-1271 because it is the **sole owner of the Zyfai smart account**. When the smart account (or protocols it interacts with) need to verify the vault's authorization, they call `isValidSignature()` on the vault, which delegates to the vault's owner (Safe multisig) for signature validation.
+
+---
+
+## 11. Key Invariants
+
+1. **Mutual Exclusivity**: `idleAssets > 0` and `pendingWithdrawals > 0` can **never** both be true simultaneously.
+
+2. **Accounting Identity**: `totalAssets() = vaultBalance + allocatedAssets + claimableFromStrategies - (pendingWithdrawals - cumulativeClaimedAssets adjustment)`
+
+3. **FIFO Claim Ordering**: `isClaimable(key)` requires `cumulativeClaimed + vaultBalance >= request.cumulativeRequestedAtTimeOfRequest`.
+
+4. **Share Burn at Request**: Shares are burned when the withdrawal request is created, not when claimed. The exchange rate is locked at request time.
+
+5. **No PnL Sync During Withdrawals**: `transmitAllocatedAssets()` reverts if `pendingWithdrawals > 0`, preventing share price manipulation during settlement.
+
+---
+
+## 12. Known Tradeoffs & Assumptions
+
+| Tradeoff                         | Description                                                                                                                                         | Mitigation                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| **Indexer liveness dependency**  | If the indexer goes offline, no withdrawals can be fulfilled and no PnL syncs occur. There is no timeout or emergency withdrawal path for users.    | Indexer is monitored. Owner multisig can intervene via `forceTransmit*` functions.  |
+| **No withdrawal reserve**        | 100% of deposits are allocated. Every withdrawal goes through the async queue unless deallocation overflow created idle assets.                     | Reduces capital inefficiency. Indexer fulfillment is expected to be reasonably fast. |
+| **FIFO whale blocking**          | A large withdrawal request blocks all subsequent requests until fully funded. No max request size exists.                                           | Accepted tradeoff. Indexer can deallocate large amounts in a single operation.      |
+| **Centralized NAV updates**      | Share price only updates when `transmitAllocatedAssets()` is called. Between calls, the NAV is stale.                                              | NAV is synced within deposit calls and by the indexer on each interaction.           |
+| **Upgradeable without timelock** | Owner multisig can upgrade the vault implementation instantly with no delay.                                                                        | Trust in multisig signers. Users must evaluate multisig configuration.              |
+| **Opaque strategy risk**         | Strategy composition is not enforced on-chain. Users trust the operator to manage risk appropriately.                                               | Off-chain reporting provides transparency.                                          |
+
+---
+
+## 13. Contract Reference
+
+### Events
+
+```
+OperatorSet(controller, operator, approved)     — ERC-7540 operator approval
+RedeemRequest(controller, owner, requestId, sender, assets)  — Async withdrawal requested
+Claimed(receiver, owner, withdrawKey, assets)   — Withdrawal claimed
+AllocatedAssetsTransmitted(newAllocatedAssets)  — PnL synced
+DeallocatedAssetsTransmitted(remainingAllocated) — Withdrawal fulfilled
+AssetsAllocated(assets)                          — Idle deployed to smart account
+SmartAccountSet(smartAccount)                    — Smart account address changed
+```
+
+### Errors
+
+```
+SA__NotSmartAccount()             — Caller is not the registered smart account
+SA__SmartAccountNotSet()          — Smart account not initialized
+SA__NotEnoughIdleAssets()          — Trying to allocate more than idle balance
+SA__PendingWithdrawals()           — PnL sync blocked during pending withdrawals
+SA__NotClaimable()                 — FIFO: earlier requests not yet fulfilled
+SA__NotAuthorized()                — Not controller or approved operator
+```
+
+### WithdrawRequest Structure
 
 ```solidity
-uint256 constant MAX_DEVIATION_RATE = 0.0025 ether; // 0.25%
-
-function _checkMaxDeviationRate(uint256 assets) internal view {
-    uint256 deviationAbs = abs(assets - allocatedAssets());
-    uint256 deviationRate = deviationAbs * 1e18 / allocatedAssets();
-    if (deviationRate > MAX_DEVIATION_RATE) revert SA__ExceededMaxDeviationRate();
+struct WithdrawRequest {
+    uint256 requestedAssets;                      // Amount requested
+    uint256 cumulativeRequestedWithdrawalAssets;  // Cumulative at time of request (FIFO index)
+    uint256 requestTimestamp;                      // Block timestamp
+    address owner;                                 // Share owner who requested
+    address receiver;                              // Asset recipient
+    bool isClaimed;                                // Claim flag (reentrancy guard)
+    uint256 requestedShares;                       // Shares burned (ERC-7540)
+    address controller;                            // Operator controller (ERC-7540)
 }
 ```
-
-This prevents the operator from arbitrarily manipulating `allocatedAssets` to extract value.
-
-### 5.3 Reentrancy Protection
-
-- `claim()` marks `isClaimed = true` BEFORE transferring assets
-- Uses OpenZeppelin's SafeERC20 for all transfers
-
----
-
-## 6. Key Invariants
-
-1. **Mutual Exclusivity**: `idleAssets() > 0` XOR `pendingWithdrawals() > 0` (never both positive)
-2. **Accounting Identity**: `totalAssets() = vaultBalance + allocatedAssets + pending - obligations`
-3. **FIFO Claims**: `isClaimable(key)` becomes true when `cumulativeClaimed + balance >= request.cumulative`
-
----
-
-## 7. Validation Commands
-
-```bash
-# Build contracts
-cd semi-async-vault && forge build
-
-# Run tests
-forge test -vvv
-
-# Check specific test
-forge test --match-test test_RequestWithdrawPartialIdleAssets -vvvv
-```
-
----
-
-## 8. Related Files
-
-### Semi-Async-Vault (Solidity)
-- `src/SemiAsyncRedeemVault.sol` - Abstract base with async withdrawal logic
-- `src/ISemiAsyncRedeemVault.sol` - Interface definition
-- `src/SmartAccountWrapper.sol` - Concrete implementation with operator controls
-- `src/SmartAccountProxy.sol` - Beacon proxy for upgradeability
-
-### Logarithm-ACP-Agent (Python)
-- `contracts/smart_wrapper.py` - Python contract interface
-- `contracts/abis/smart_wrapper.py` - Contract ABI
-- `contracts/base.py` - Base Web3 contract class
-- `acp_agents/smart_wrapper_operator.py` - Polling operator service
-- `utils/smart_accounts/zyfai.py` - Zyfai smart account integration
