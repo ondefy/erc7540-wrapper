@@ -215,16 +215,26 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         return balanceOf(owner);
     }
 
+    /**
+     * @inheritdoc ERC4626Upgradeable
+     */
+    function previewRedeem(uint256) public pure override returns (uint256) {
+        revert("ERC7540: async vault");
+    }
+
+    /**
+     * @inheritdoc ERC4626Upgradeable
+     */
+    function previewWithdraw(uint256) public pure override returns (uint256) {
+        revert("ERC7540: async vault");
+    }
+
     /*//////////////////////////////////////////////////////////////
                     ERC-7540 PENDING/CLAIMABLE VIEWS
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IERC7540Redeem
-    function pendingRedeemRequest(uint256 requestId, address controller)
-        external
-        view
-        returns (uint256 pendingShares)
-    {
+    function pendingRedeemRequest(uint256 requestId, address controller) external view returns (uint256 pendingShares) {
         bytes32 withdrawKey = bytes32(requestId);
         WithdrawRequest memory request = _getSemiAsyncRedeemVaultStorage().withdrawRequests[withdrawKey];
 
@@ -285,7 +295,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         uint256 maxRequestAssets = maxRequestWithdraw(owner);
         if (assets > maxRequestAssets) revert SA__ExceededMaxRequestWithdraw(owner, assets, maxRequestAssets);
 
-        uint256 shares = previewWithdraw(assets);
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
 
         // For backward compat: receiver serves as both controller and receiver
         return _processRequest(assets, shares, receiver, receiver, owner);
@@ -314,7 +324,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         uint256 maxRequestShares = maxRequestRedeem(owner);
         if (shares > maxRequestShares) revert SA__ExceededMaxRequestRedeem(owner, shares, maxRequestShares);
 
-        uint256 assets = previewRedeem(shares);
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
 
         // Controller is both controller and receiver in ERC-7540 flow
         bytes32 withdrawKey = _processRequest(assets, shares, controller, controller, owner);

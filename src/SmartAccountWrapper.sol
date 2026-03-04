@@ -17,8 +17,6 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
     using Math for uint256;
     using SafeERC20 for IERC20;
 
-    uint256 constant MAX_DEVIATION_RATE = 0.0025 ether; // 0.25%
-
     /// @notice ERC-1271 magic value for valid signatures
     bytes4 private constant ERC1271_MAGIC_VALUE = 0x1626ba7e;
 
@@ -54,6 +52,7 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
     struct SmartAccountWrapperStorage {
         address smartAccount;
         uint256 allocatedAssets;
+        uint256 assetBalance;
     }
 
     // keccak256(abi.encode(uint256(keccak256("zyfai.storage.SmartAccountWrapper")) - 1)) & ~bytes32(uint256(0xff))
@@ -119,6 +118,7 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
         address _smartAccount = smartAccount();
         if (_smartAccount == address(0)) revert SA__SmartAccountNotSet();
         _getSmartAccountWrapperStorage().allocatedAssets += assets;
+        _getSmartAccountWrapperStorage().assetBalance += assets;
         IERC20(asset()).safeTransfer(_smartAccount, assets);
     }
 
@@ -140,19 +140,8 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
         emit DeallocatedAssetsTransmitted(remainingAllocatedAssets);
     }
 
-    function _checkMaxDeviationRate(uint256 assets) internal view {
-        uint256 _allocatedAssets = allocatedAssets();
-        if (_allocatedAssets > 0) {
-            // check if the deviation is within the allowed range
-            uint256 deviationAbs = assets > _allocatedAssets ? assets - _allocatedAssets : _allocatedAssets - assets;
-            uint256 deviationRate = deviationAbs.mulDiv(1 ether, _allocatedAssets);
-            if (deviationRate > MAX_DEVIATION_RATE) revert SA__ExceededMaxDeviationRate();
-        }
-    }
-
     function transmitAllocatedAssets(uint256 assets) public onlySmartAccount {
         if (pendingWithdrawals() > 0) revert SA__PendingWithdrawals();
-        _checkMaxDeviationRate(assets);
         _getSmartAccountWrapperStorage().allocatedAssets = assets;
         emit AllocatedAssetsTransmitted(assets);
     }
@@ -173,9 +162,10 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
         emit AssetsAllocated(assets);
     }
 
-    function setSmartAccount(address smartAccount_) public onlyOwner {
+    function setSmartAccount(address smartAccount_, uint256 allocatedAssets_) public onlyOwner {
         if (smartAccount_ == address(0)) revert SA__ZeroAddress();
         _getSmartAccountWrapperStorage().smartAccount = smartAccount_;
+        _getSmartAccountWrapperStorage().allocatedAssets = allocatedAssets_;
         emit SmartAccountSet(smartAccount_);
     }
 
