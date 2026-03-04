@@ -7,6 +7,7 @@ import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/Upgradeabl
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {DeployHelper} from "../script/utils/DeployHelper.sol";
 import {SmartAccountWrapper} from "../src/SmartAccountWrapper.sol";
@@ -683,6 +684,110 @@ contract SmartAccountWrapperTest is Test {
         vm.prank(newOwner);
         vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, newOwner));
         smartAccountWrapper.forceTransmitAllocatedAssets(0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          PAUSABLE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_PauseUnpause() public {
+        assertEq(smartAccountWrapper.paused(), false);
+        smartAccountWrapper.pause();
+        assertEq(smartAccountWrapper.paused(), true);
+        smartAccountWrapper.unpause();
+        assertEq(smartAccountWrapper.paused(), false);
+    }
+
+    function testRevert_PauseNotOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, user));
+        smartAccountWrapper.pause();
+    }
+
+    function testRevert_UnpauseNotOwner() public {
+        smartAccountWrapper.pause();
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, user));
+        smartAccountWrapper.unpause();
+    }
+
+    function testRevert_DepositWhenPaused() public {
+        smartAccountWrapper.pause();
+        vm.startPrank(user);
+        asset.approve(address(smartAccountWrapper), 1000);
+        vm.expectRevert();
+        smartAccountWrapper.deposit(1000, user);
+        vm.stopPrank();
+    }
+
+    function testRevert_MintWhenPaused() public {
+        smartAccountWrapper.pause();
+        vm.startPrank(user);
+        asset.approve(address(smartAccountWrapper), 1000);
+        vm.expectRevert();
+        smartAccountWrapper.mint(1000, user);
+        vm.stopPrank();
+    }
+
+    function testRevert_RequestWithdrawWhenPaused() public afterDeposit(MAX_AMOUNT) {
+        smartAccountWrapper.pause();
+        vm.prank(user);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        smartAccountWrapper.requestWithdraw(1000, user, user);
+    }
+
+    function testRevert_RequestRedeemWhenPaused() public afterDeposit(MAX_AMOUNT) {
+        smartAccountWrapper.pause();
+        vm.prank(user);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        smartAccountWrapper.requestRedeem(100, user, user);
+    }
+
+    function test_MaxDeposit_ReturnsZeroWhenPaused() public {
+        smartAccountWrapper.pause();
+        assertEq(smartAccountWrapper.maxDeposit(user), 0);
+    }
+
+    function test_MaxMint_ReturnsZeroWhenPaused() public {
+        smartAccountWrapper.pause();
+        assertEq(smartAccountWrapper.maxMint(user), 0);
+    }
+
+    function test_MaxRequestWithdraw_ReturnsZeroWhenPaused() public afterDeposit(MAX_AMOUNT) {
+        smartAccountWrapper.pause();
+        assertEq(smartAccountWrapper.maxRequestWithdraw(user), 0);
+    }
+
+    function test_MaxRequestRedeem_ReturnsZeroWhenPaused() public afterDeposit(MAX_AMOUNT) {
+        smartAccountWrapper.pause();
+        assertEq(smartAccountWrapper.maxRequestRedeem(user), 0);
+    }
+
+    function test_ClaimStillWorksWhenPaused() public afterDeposit(MAX_AMOUNT) {
+        uint256 requestAmount = MAX_AMOUNT / 10;
+        vm.prank(user);
+        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        _processWithdrawRequest(requestAmount);
+
+        // Pause after request is claimable
+        smartAccountWrapper.pause();
+
+        // Claim should still work — users must be able to exit
+        uint256 balBefore = asset.balanceOf(user);
+        vm.prank(user);
+        smartAccountWrapper.claim(withdrawKey);
+        assertEq(asset.balanceOf(user), balBefore + requestAmount);
+    }
+
+    function test_DepositWorksAfterUnpause() public {
+        smartAccountWrapper.pause();
+        smartAccountWrapper.unpause();
+
+        vm.startPrank(user);
+        asset.approve(address(smartAccountWrapper), 1000);
+        smartAccountWrapper.deposit(1000, user);
+        vm.stopPrank();
+        assertEq(smartAccountWrapper.totalAssets(), 1000);
     }
 
     function test_isValidSignature_Contract_WrongHash() public {

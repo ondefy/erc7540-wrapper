@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -15,7 +16,7 @@ import {IERC7540Redeem, IERC7540Operator} from "forge-std/interfaces/IERC7540.so
 
 import {SemiAsyncRedeemVault} from "./SemiAsyncRedeemVault.sol";
 
-contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, SemiAsyncRedeemVault, IERC1271 {
+contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, PausableUpgradeable, SemiAsyncRedeemVault, IERC1271 {
     using Math for uint256;
     using SafeERC20 for IERC20;
 
@@ -88,6 +89,7 @@ contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, SemiAsyn
         string memory symbol_
     ) public initializer {
         __Ownable_init(owner_);
+        __Pausable_init();
         __ERC20_init_unchained(name_, symbol_);
         __ERC4626_init_unchained(IERC20(underlyingToken_));
         _getSmartAccountWrapperStorage().smartAccount = smartAccount_;
@@ -109,10 +111,28 @@ contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, SemiAsyn
                                USER LOGIC
     //////////////////////////////////////////////////////////////*/
 
-    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override whenNotPaused {
         super._deposit(caller, receiver, assets, shares);
         // transfer assets to smart account
         _transferToSmartAccount(assets);
+    }
+
+    function requestWithdraw(uint256 assets, address receiver, address owner)
+        public
+        override
+        whenNotPaused
+        returns (bytes32 withdrawKey)
+    {
+        return super.requestWithdraw(assets, receiver, owner);
+    }
+
+    function requestRedeem(uint256 shares, address controller, address owner)
+        public
+        override
+        whenNotPaused
+        returns (uint256 requestId)
+    {
+        return super.requestRedeem(shares, controller, owner);
     }
 
     function _transferToSmartAccount(uint256 assets) internal {
@@ -162,6 +182,14 @@ contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, SemiAsyn
         emit AssetsAllocated(assets);
     }
 
+    function pause() public onlyOwner {
+        _pause();
+    }
+
+    function unpause() public onlyOwner {
+        _unpause();
+    }
+
     function setSmartAccount(address smartAccount_, uint256 allocatedAssets_) public onlyOwner {
         if (smartAccount_ == address(0)) revert SA__ZeroAddress();
         _getSmartAccountWrapperStorage().smartAccount = smartAccount_;
@@ -182,6 +210,7 @@ contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, SemiAsyn
     //////////////////////////////////////////////////////////////*/
     /// @inheritdoc IERC4626
     function maxDeposit(address) public view virtual override(ERC4626Upgradeable, IERC4626) returns (uint256) {
+        if (paused()) return 0;
         address _smartAccount = _getSmartAccountWrapperStorage().smartAccount;
         if (_smartAccount == address(0)) return 0;
         return type(uint256).max;
@@ -189,9 +218,20 @@ contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, SemiAsyn
 
     /// @inheritdoc IERC4626
     function maxMint(address) public view virtual override(ERC4626Upgradeable, IERC4626) returns (uint256) {
+        if (paused()) return 0;
         address _smartAccount = _getSmartAccountWrapperStorage().smartAccount;
         if (_smartAccount == address(0)) return 0;
         return type(uint256).max;
+    }
+
+    function maxRequestWithdraw(address owner) public view override returns (uint256) {
+        if (paused()) return 0;
+        return super.maxRequestWithdraw(owner);
+    }
+
+    function maxRequestRedeem(address owner) public view override returns (uint256) {
+        if (paused()) return 0;
+        return super.maxRequestRedeem(owner);
     }
 
     /*//////////////////////////////////////////////////////////////

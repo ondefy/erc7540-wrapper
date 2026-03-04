@@ -202,7 +202,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
     /**
      * @inheritdoc ISemiAsyncRedeemVault
      */
-    function maxRequestWithdraw(address owner) public view returns (uint256) {
+    function maxRequestWithdraw(address owner) public view virtual returns (uint256) {
         // User can always request up to their max withdrawable assets; any shortfall becomes pending
         return convertToAssets(balanceOf(owner));
     }
@@ -210,7 +210,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
     /**
      * @inheritdoc ISemiAsyncRedeemVault
      */
-    function maxRequestRedeem(address owner) public view returns (uint256) {
+    function maxRequestRedeem(address owner) public view virtual returns (uint256) {
         // User can request to redeem up to their shares; any shortfall in assets becomes pending
         return balanceOf(owner);
     }
