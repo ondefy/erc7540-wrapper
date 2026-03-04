@@ -2,18 +2,20 @@
 pragma solidity ^0.8.0;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {ERC4626Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {IERC7540Redeem, IERC7540Operator} from "forge-std/interfaces/IERC7540.sol";
 
 import {SemiAsyncRedeemVault} from "./SemiAsyncRedeemVault.sol";
 
-contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRedeemVault, IERC1271 {
+contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, SemiAsyncRedeemVault, IERC1271 {
     using Math for uint256;
     using SafeERC20 for IERC20;
 
@@ -31,9 +33,9 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
     error SA__SmartAccountNotSet();
     error SA__NotEnoughIdleAssets(uint256 assets, uint256 idleAssets);
     error SA__PendingWithdrawals();
-    error SA__ExceededMaxDeviationRate();
     error SA__DeallocatedAssetsExceedAllocated(uint256 remaining, uint256 allocated);
     error SA__ZeroAddress();
+    error SA__NotEnoughVaultBalance(uint256 assets, uint256 vaultBalance);
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -52,7 +54,6 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
     struct SmartAccountWrapperStorage {
         address smartAccount;
         uint256 allocatedAssets;
-        uint256 assetBalance;
     }
 
     // keccak256(abi.encode(uint256(keccak256("zyfai.storage.SmartAccountWrapper")) - 1)) & ~bytes32(uint256(0xff))
@@ -118,7 +119,6 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
         address _smartAccount = smartAccount();
         if (_smartAccount == address(0)) revert SA__SmartAccountNotSet();
         _getSmartAccountWrapperStorage().allocatedAssets += assets;
-        _getSmartAccountWrapperStorage().assetBalance += assets;
         IERC20(asset()).safeTransfer(_smartAccount, assets);
     }
 
@@ -175,6 +175,23 @@ contract SmartAccountWrapper is Initializable, OwnableUpgradeable, SemiAsyncRede
 
     function smartAccount() public view returns (address) {
         return _getSmartAccountWrapperStorage().smartAccount;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              ERC4626 LOGIC
+    //////////////////////////////////////////////////////////////*/
+    /// @inheritdoc IERC4626
+    function maxDeposit(address) public view virtual override(ERC4626Upgradeable, IERC4626) returns (uint256) {
+        address _smartAccount = _getSmartAccountWrapperStorage().smartAccount;
+        if (_smartAccount == address(0)) return 0;
+        return type(uint256).max;
+    }
+
+    /// @inheritdoc IERC4626
+    function maxMint(address) public view virtual override(ERC4626Upgradeable, IERC4626) returns (uint256) {
+        address _smartAccount = _getSmartAccountWrapperStorage().smartAccount;
+        if (_smartAccount == address(0)) return 0;
+        return type(uint256).max;
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -144,7 +144,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         uint256 vaultBalance = IERC20(asset()).balanceOf(address(this));
         uint256 gross = vaultBalance + allocatedAssets() + pendingDeallocationAssets() + claimableFromStrategies();
         uint256 obligations = _outstandingObligations();
-        if (obligations > gross) revert SA__TotalAssetsUnderflow();
+        if (obligations > gross) return 0;
         unchecked {
             return gross - obligations;
         }
@@ -218,14 +218,14 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
     /**
      * @inheritdoc ERC4626Upgradeable
      */
-    function previewRedeem(uint256) public pure override returns (uint256) {
+    function previewRedeem(uint256) public pure override(ERC4626Upgradeable, IERC4626) returns (uint256) {
         revert("ERC7540: async vault");
     }
 
     /**
      * @inheritdoc ERC4626Upgradeable
      */
-    function previewWithdraw(uint256) public pure override returns (uint256) {
+    function previewWithdraw(uint256) public pure override(ERC4626Upgradeable, IERC4626) returns (uint256) {
         revert("ERC7540: async vault");
     }
 
@@ -392,7 +392,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         });
 
         // Emit ERC-7540 event
-        emit RedeemRequest(controller, owner, uint256(withdrawKey), caller, assetsToRequest);
+        emit RedeemRequest(controller, owner, uint256(withdrawKey), caller, sharesToRequest);
         // Emit deprecated event for backward compatibility
         emit WithdrawRequested(caller, receiver, owner, withdrawKey, assetsToRequest, sharesToRequest);
 

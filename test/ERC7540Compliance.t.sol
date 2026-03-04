@@ -376,7 +376,7 @@ contract ERC7540ComplianceTest is Test {
         assertTrue(vault.isClaimable(withdrawKey) == false, "not claimable yet");
 
         SemiAsyncRedeemVault.WithdrawRequest memory request = vault.withdrawRequests(withdrawKey);
-        assertEq(request.requestedAssets, vault.previewRedeem(shares), "assets should match");
+        assertEq(request.requestedAssets, vault.convertToAssets(shares), "assets should match");
     }
 
     function test_requestWithdraw_backwardCompat_setsControllerAsReceiver() public {

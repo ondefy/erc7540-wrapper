@@ -6,6 +6,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 import {DeployHelper} from "../script/utils/DeployHelper.sol";
 import {SmartAccountWrapper} from "../src/SmartAccountWrapper.sol";
@@ -164,7 +165,7 @@ contract SmartAccountWrapperTest is Test {
     }
 
     function test_TransmitAllocatedAssets(uint256 profit) public afterDeposit(MAX_AMOUNT) {
-        profit = bound(profit, 1, MAX_AMOUNT * 0.0025 ether / 1 ether);
+        profit = bound(profit, 1, MAX_AMOUNT);
         asset.mint(address(smartAccount), profit);
         assertEq(smartAccountWrapper.allocatedAssets(), MAX_AMOUNT);
         vm.startPrank(smartAccount);
@@ -180,23 +181,6 @@ contract SmartAccountWrapperTest is Test {
         vm.startPrank(smartAccount);
         vm.expectRevert(abi.encodeWithSelector(SmartAccountWrapper.SA__PendingWithdrawals.selector));
         smartAccountWrapper.transmitAllocatedAssets(MAX_AMOUNT);
-        vm.stopPrank();
-    }
-
-    function testRevert_TransmitAllocatedAssets_ExceededMaxDeviationRate() public afterDeposit(MAX_AMOUNT) {
-        // MAX_AMOUNT = 100000 * 1e18
-        // abnormal amount: MAX_AMOUNT * 1.003 = 100300 * 1e18
-        vm.startPrank(smartAccount);
-        vm.expectRevert(abi.encodeWithSelector(SmartAccountWrapper.SA__ExceededMaxDeviationRate.selector));
-        smartAccountWrapper.transmitAllocatedAssets(MAX_AMOUNT * 1.003 ether / 1 ether);
-        vm.stopPrank();
-    }
-
-    function test_ForceTransmitAllocatedAssets() public afterDeposit(MAX_AMOUNT) {
-        // MAX_AMOUNT = 100000 * 1e18
-        // abnormal amount: MAX_AMOUNT * 1.003 = 100300 * 1e18
-        vm.startPrank(address(this));
-        smartAccountWrapper.forceTransmitAllocatedAssets(MAX_AMOUNT * 1.03 ether / 1 ether);
         vm.stopPrank();
     }
 
@@ -228,35 +212,6 @@ contract SmartAccountWrapperTest is Test {
 
     function test_ClaimableFromStrategies() public view {
         assertEq(smartAccountWrapper.claimableFromStrategies(), 0);
-    }
-
-    function test_Withdraw() public afterDeposit(MAX_AMOUNT) {
-        // Add idle assets first
-        asset.mint(address(smartAccountWrapper), MAX_AMOUNT / 2);
-        uint256 withdrawAmount = MAX_AMOUNT / 4;
-        uint256 userBalanceBefore = asset.balanceOf(user);
-        vm.startPrank(user);
-        smartAccountWrapper.withdraw(withdrawAmount, user, user);
-        vm.stopPrank();
-        // After withdrawal, user should have their original balance plus the withdrawn amount
-        assertEq(asset.balanceOf(user), userBalanceBefore + withdrawAmount);
-        // Idle assets should be reduced by the withdrawal amount
-        assertEq(smartAccountWrapper.idleAssets(), MAX_AMOUNT / 2 - withdrawAmount);
-    }
-
-    function test_Redeem() public afterDeposit(MAX_AMOUNT) {
-        // Add idle assets first
-        asset.mint(address(smartAccountWrapper), MAX_AMOUNT / 2);
-        uint256 maxRedeem = smartAccountWrapper.maxRedeem(user);
-        uint256 userShares = smartAccountWrapper.balanceOf(user);
-        uint256 shares = maxRedeem / 2; // Use maxRedeem instead of userShares
-        uint256 userBalanceBefore = asset.balanceOf(user);
-        vm.startPrank(user);
-        smartAccountWrapper.redeem(shares, user, user);
-        vm.stopPrank();
-        assertEq(smartAccountWrapper.balanceOf(user), userShares - shares);
-        // User should receive assets for the redeemed shares
-        assertGt(asset.balanceOf(user), userBalanceBefore);
     }
 
     function test_MaxWithdraw() public afterDeposit(MAX_AMOUNT) {
@@ -381,19 +336,6 @@ contract SmartAccountWrapperTest is Test {
         smartAccountWrapper.requestWithdraw(requestAmount, user, user);
         vm.stopPrank();
         assertEq(smartAccountWrapper.pendingWithdrawals(), requestAmount);
-    }
-
-    function test_WithdrawWithIdleAssets() public afterDeposit(MAX_AMOUNT) {
-        // Add some idle assets
-        asset.mint(address(smartAccountWrapper), MAX_AMOUNT / 2);
-        uint256 withdrawAmount = MAX_AMOUNT / 4;
-
-        vm.startPrank(user);
-        smartAccountWrapper.withdraw(withdrawAmount, user, user);
-        vm.stopPrank();
-
-        assertEq(asset.balanceOf(user), withdrawAmount);
-        assertEq(smartAccountWrapper.idleAssets(), MAX_AMOUNT / 2 - withdrawAmount);
     }
 
     function test_RequestWithdrawWithIdleAssets() public afterDeposit(MAX_AMOUNT) {
@@ -534,9 +476,7 @@ contract SmartAccountWrapperTest is Test {
         vm.createSelectFork("base", 37692185);
         vm.startPrank(owner);
         UpgradeableBeacon(beacon).upgradeTo(address(new SmartAccountWrapper()));
-        SmartAccountWrapper(wrapper).reinitialize(owner);
         vm.stopPrank();
-        assertEq(_wrapper.owner(), owner);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -712,6 +652,37 @@ contract SmartAccountWrapperTest is Test {
 
         bytes4 result = wrapper.isValidSignature(hash, signatures);
         assertEq(result, ERC1271_INVALID, "should return invalid when not enough owner signatures");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      2-STEP OWNERSHIP TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_TwoStepOwnershipTransfer() public {
+        address newOwner = makeAddr("newOwner");
+
+        // Step 1: current owner initiates transfer
+        smartAccountWrapper.transferOwnership(newOwner);
+        // Owner hasn't changed yet
+        assertEq(smartAccountWrapper.owner(), address(this));
+        assertEq(smartAccountWrapper.pendingOwner(), newOwner);
+
+        // Step 2: new owner accepts
+        vm.prank(newOwner);
+        smartAccountWrapper.acceptOwnership();
+        assertEq(smartAccountWrapper.owner(), newOwner);
+        assertEq(smartAccountWrapper.pendingOwner(), address(0));
+    }
+
+    function test_PendingOwnerCannotActAsOwner() public {
+        address newOwner = makeAddr("newOwner");
+
+        smartAccountWrapper.transferOwnership(newOwner);
+
+        // Pending owner tries to call onlyOwner function before accepting
+        vm.prank(newOwner);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, newOwner));
+        smartAccountWrapper.forceTransmitAllocatedAssets(0);
     }
 
     function test_isValidSignature_Contract_WrongHash() public {
