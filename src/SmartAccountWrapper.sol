@@ -16,7 +16,13 @@ import {IERC7540Redeem, IERC7540Operator} from "forge-std/interfaces/IERC7540.so
 
 import {SemiAsyncRedeemVault} from "./SemiAsyncRedeemVault.sol";
 
-contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, PausableUpgradeable, SemiAsyncRedeemVault, IERC1271 {
+contract SmartAccountWrapper is
+    Initializable,
+    Ownable2StepUpgradeable,
+    PausableUpgradeable,
+    SemiAsyncRedeemVault,
+    IERC1271
+{
     using Math for uint256;
     using SafeERC20 for IERC20;
 
@@ -88,6 +94,7 @@ contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, Pausable
         string memory name_,
         string memory symbol_
     ) public initializer {
+        if (underlyingToken_ == address(0)) revert SA__ZeroAddress();
         __Ownable_init(owner_);
         __Pausable_init();
         __ERC20_init_unchained(name_, symbol_);
@@ -111,7 +118,11 @@ contract SmartAccountWrapper is Initializable, Ownable2StepUpgradeable, Pausable
                                USER LOGIC
     //////////////////////////////////////////////////////////////*/
 
-    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override whenNotPaused {
+    function _deposit(address caller, address receiver, uint256 assets, uint256 shares)
+        internal
+        override
+        whenNotPaused
+    {
         super._deposit(caller, receiver, assets, shares);
         // transfer assets to smart account
         _transferToSmartAccount(assets);
