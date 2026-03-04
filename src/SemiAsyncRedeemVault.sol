@@ -335,18 +335,8 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         internal
         returns (bytes32)
     {
-        uint256 maxAssets = maxWithdraw(owner);
-        uint256 assetsToWithdraw = Math.min(assets, maxAssets);
-        // always assetsToWithdraw <= assets
-        uint256 assetsToRequest = assets - assetsToWithdraw;
-
-        uint256 sharesToRedeem = _convertToShares(assetsToWithdraw, Math.Rounding.Ceil);
-        uint256 sharesToRequest = shares - sharesToRedeem;
-
-        if (assetsToWithdraw > 0) _withdraw(_msgSender(), receiver, owner, assetsToWithdraw, sharesToRedeem);
-
-        if (assetsToRequest > 0 && sharesToRequest > 0) {
-            return _requestWithdraw(_msgSender(), controller, receiver, owner, assetsToRequest, sharesToRequest);
+        if (assets > 0 && shares > 0) {
+            return _requestWithdraw(_msgSender(), controller, receiver, owner, assets, shares);
         }
         return bytes32(0);
     }
