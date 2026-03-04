@@ -38,26 +38,6 @@ interface ISemiAsyncRedeemVault is IERC4626, IERC7540Redeem {
      */
     event Claimed(address indexed receiver, address indexed owner, bytes32 indexed withdrawKey, uint256 assets);
 
-    /*//////////////////////////////////////////////////////////////
-                         DEPRECATED FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice DEPRECATED: Requests to withdraw a specific amount of underlying assets
-     * @dev Hybrid workflow:
-     * - Up to the available idle assets may be sent immediately to the receiver
-     * - Any shortfall becomes an asynchronous withdrawal request
-     * - The corresponding shares are burned from the owner's balance
-     *
-     * @param assets The amount of underlying assets to withdraw
-     * @param receiver The address that will receive the withdrawn assets
-     * @param owner The address that owns the shares being withdrawn
-     * @return withdrawKey Unique identifier for the pending shortfall:
-     *         - bytes32(0) if the withdrawal was fully satisfied immediately
-     *         - Non-zero if a shortfall was requested asynchronously
-     */
-    function requestWithdraw(uint256 assets, address receiver, address owner) external returns (bytes32);
-
     /**
      * @notice Checks whether a withdrawal request is ready to be claimed
      * @param withdrawKey The unique identifier of the withdrawal request
@@ -82,13 +62,6 @@ interface ISemiAsyncRedeemVault is IERC4626, IERC7540Redeem {
     /*//////////////////////////////////////////////////////////////
                            VAULT-SPECIFIC VIEWS
     //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Returns the maximum amount of underlying assets that can be requested for withdrawal
-     * @param owner The address to check the requestable withdrawal limit for
-     * @return The maximum assets that can be requested given the owner's balance and current conditions
-     */
-    function maxRequestWithdraw(address owner) external view returns (uint256);
 
     /**
      * @notice Returns the maximum amount of vault shares that can be requested for redemption

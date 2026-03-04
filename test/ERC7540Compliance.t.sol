@@ -110,18 +110,17 @@ contract ERC7540ComplianceTest is Test {
         assertNotEq(requestId, 0, "should return non-zero requestId for async request");
     }
 
-    function test_requestRedeem_returnsZeroForImmediateFulfillment() public {
+    function test_requestRedeem_alwaysReturnsRequestId() public {
         _deposit(user, MAX_AMOUNT);
-        // Add idle assets so the request can be immediately fulfilled
+        // Add idle assets — requests are always async now
         asset.mint(address(vault), MAX_AMOUNT / 2);
 
-        uint256 maxRedeem = vault.maxRedeem(user);
-        uint256 shares = maxRedeem / 4;
+        uint256 shares = MAX_AMOUNT / 4;
 
         vm.prank(user);
         uint256 requestId = vault.requestRedeem(shares, user, user);
 
-        assertEq(requestId, 0, "should return 0 for fully-immediate request");
+        assertNotEq(requestId, 0, "should always return a non-zero requestId");
     }
 
     function test_requestRedeem_emitsRedeemRequestEvent() public {
@@ -379,23 +378,6 @@ contract ERC7540ComplianceTest is Test {
         assertEq(request.requestedAssets, vault.convertToAssets(shares), "assets should match");
     }
 
-    function test_requestWithdraw_backwardCompat_setsControllerAsReceiver() public {
-        _deposit(user, MAX_AMOUNT);
-
-        uint256 amount = MAX_AMOUNT / 4;
-
-        vm.prank(user);
-        bytes32 withdrawKey = vault.requestWithdraw(amount, user, user);
-
-        SemiAsyncRedeemVault.WithdrawRequest memory request = vault.withdrawRequests(withdrawKey);
-        assertEq(request.controller, user, "controller should be receiver for backward compat");
-        assertEq(request.receiver, user, "receiver should match");
-
-        // Should also work with ERC-7540 views
-        uint256 requestId = uint256(withdrawKey);
-        uint256 pending = vault.pendingRedeemRequest(requestId, user);
-        assertGt(pending, 0, "should have pending shares via ERC-7540 view");
-    }
 
     /*//////////////////////////////////////////////////////////////
                         CLAIM WITH REQUEST ID

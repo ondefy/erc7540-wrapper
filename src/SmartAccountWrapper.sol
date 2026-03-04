@@ -128,15 +128,6 @@ contract SmartAccountWrapper is
         _transferToSmartAccount(assets);
     }
 
-    function requestWithdraw(uint256 assets, address receiver, address owner)
-        public
-        override
-        whenNotPaused
-        returns (bytes32 withdrawKey)
-    {
-        return super.requestWithdraw(assets, receiver, owner);
-    }
-
     function requestRedeem(uint256 shares, address controller, address owner)
         public
         override
@@ -233,11 +224,6 @@ contract SmartAccountWrapper is
         address _smartAccount = _getSmartAccountWrapperStorage().smartAccount;
         if (_smartAccount == address(0)) return 0;
         return type(uint256).max;
-    }
-
-    function maxRequestWithdraw(address owner) public view override returns (uint256) {
-        if (paused()) return 0;
-        return super.maxRequestWithdraw(owner);
     }
 
     function maxRequestRedeem(address owner) public view override returns (uint256) {

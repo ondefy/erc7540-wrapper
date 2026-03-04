@@ -100,16 +100,6 @@ contract SmartAccountWrapperTest is Test {
         _;
     }
 
-    function test_RequestWithdraw(uint256 amount) public afterDeposit(MAX_AMOUNT) {
-        amount = bound(amount, 1, MAX_AMOUNT);
-        vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(amount, user, user);
-        vm.stopPrank();
-        _assertAssetStates(0, amount, MAX_AMOUNT, MAX_AMOUNT - amount);
-        assertNotEq(withdrawKey, bytes32(0), "withdrawKey is not the expected value");
-        assertEq(smartAccountWrapper.isClaimable(withdrawKey), false, "not claimable");
-    }
-
     function _processWithdrawRequest(uint256 amount) public {
         vm.startPrank(smartAccount);
         // Transfer tokens from smartAccount to wrapper (simulating deallocation)
@@ -122,7 +112,7 @@ contract SmartAccountWrapperTest is Test {
     function test_ProcessWithdrawRequest(uint256 amount) public afterDeposit(MAX_AMOUNT) {
         amount = bound(amount, 1, MAX_AMOUNT);
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(amount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(amount, user, user));
         vm.stopPrank();
         _processWithdrawRequest(smartAccountWrapper.pendingWithdrawals());
         _assertAssetStates(0, 0, MAX_AMOUNT - amount, MAX_AMOUNT - amount);
@@ -137,7 +127,7 @@ contract SmartAccountWrapperTest is Test {
         uint256 overflowAmount = 1;
         amount = bound(amount, 1, MAX_AMOUNT - overflowAmount);
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(amount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(amount, user, user));
         vm.stopPrank();
         _processWithdrawRequest(smartAccountWrapper.pendingWithdrawals() + 1);
         _assertAssetStates(1, 0, MAX_AMOUNT - amount - overflowAmount, MAX_AMOUNT - amount);
@@ -177,7 +167,7 @@ contract SmartAccountWrapperTest is Test {
 
     function testRevert_TransmitAllocatedAssets_PendingWithdrawals() public afterDeposit(MAX_AMOUNT) {
         vm.startPrank(user);
-        smartAccountWrapper.requestWithdraw(MAX_AMOUNT / 10, user, user);
+        smartAccountWrapper.requestRedeem(MAX_AMOUNT / 10, user, user);
         vm.stopPrank();
         vm.startPrank(smartAccount);
         vm.expectRevert(abi.encodeWithSelector(SmartAccountWrapper.SA__PendingWithdrawals.selector));
@@ -225,11 +215,6 @@ contract SmartAccountWrapperTest is Test {
         assertEq(maxRedeem, 0); // No idle assets after deposit
     }
 
-    function test_MaxRequestWithdraw() public afterDeposit(MAX_AMOUNT) {
-        uint256 maxRequestWithdraw = smartAccountWrapper.maxRequestWithdraw(user);
-        assertEq(maxRequestWithdraw, MAX_AMOUNT);
-    }
-
     function test_MaxRequestRedeem() public afterDeposit(MAX_AMOUNT) {
         uint256 maxRequestRedeem = smartAccountWrapper.maxRequestRedeem(user);
         uint256 userShares = smartAccountWrapper.balanceOf(user);
@@ -243,18 +228,6 @@ contract SmartAccountWrapperTest is Test {
         vm.stopPrank();
         assertNotEq(requestId, 0);
         assertEq(smartAccountWrapper.isClaimable(bytes32(requestId)), false);
-    }
-
-    function testRevert_RequestWithdraw_ExceededMax() public afterDeposit(MAX_AMOUNT) {
-        uint256 excessAmount = MAX_AMOUNT + 1;
-        vm.startPrank(user);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                SemiAsyncRedeemVault.SA__ExceededMaxRequestWithdraw.selector, user, excessAmount, MAX_AMOUNT
-            )
-        );
-        smartAccountWrapper.requestWithdraw(excessAmount, user, user);
-        vm.stopPrank();
     }
 
     function testRevert_RequestRedeem_ExceededMax() public afterDeposit(MAX_AMOUNT) {
@@ -273,7 +246,7 @@ contract SmartAccountWrapperTest is Test {
     function testRevert_Claim_NotClaimable() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
         vm.stopPrank();
         vm.expectRevert(abi.encodeWithSelector(SemiAsyncRedeemVault.SA__NotClaimable.selector, withdrawKey));
         smartAccountWrapper.claim(withdrawKey);
@@ -282,7 +255,7 @@ contract SmartAccountWrapperTest is Test {
     function test_IsClaimed() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
         vm.stopPrank();
         assertEq(smartAccountWrapper.isClaimed(withdrawKey), false);
         _processWithdrawRequest(requestAmount);
@@ -294,7 +267,7 @@ contract SmartAccountWrapperTest is Test {
 
     function test_WithdrawRequests() public afterDeposit(MAX_AMOUNT) {
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(MAX_AMOUNT / 10, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(MAX_AMOUNT / 10, user, user));
         vm.stopPrank();
 
         SemiAsyncRedeemVault.WithdrawRequest memory request = smartAccountWrapper.withdrawRequests(withdrawKey);
@@ -314,7 +287,7 @@ contract SmartAccountWrapperTest is Test {
     function test_CumulativeRequestedWithdrawalAssets() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.startPrank(user);
-        smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        smartAccountWrapper.requestRedeem(requestAmount, user, user);
         vm.stopPrank();
         assertEq(smartAccountWrapper.cumulativeRequestedWithdrawalAssets(), requestAmount);
     }
@@ -334,59 +307,29 @@ contract SmartAccountWrapperTest is Test {
     function test_PendingWithdrawals() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.startPrank(user);
-        smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        smartAccountWrapper.requestRedeem(requestAmount, user, user);
         vm.stopPrank();
         assertEq(smartAccountWrapper.pendingWithdrawals(), requestAmount);
-    }
-
-    function test_RequestWithdrawWithIdleAssets() public afterDeposit(MAX_AMOUNT) {
-        // Add some idle assets
-        asset.mint(address(smartAccountWrapper), MAX_AMOUNT / 2);
-        uint256 requestAmount = MAX_AMOUNT / 4;
-
-        vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
-        vm.stopPrank();
-
-        // Should immediately withdraw available assets and only request the remainder
-        assertEq(smartAccountWrapper.idleAssets(), MAX_AMOUNT / 2 - requestAmount);
-        assertEq(smartAccountWrapper.pendingWithdrawals(), 0);
-        assertEq(withdrawKey, bytes32(0)); // No pending request since all assets were available
-    }
-
-    function test_RequestWithdrawPartialIdleAssets() public afterDeposit(MAX_AMOUNT) {
-        // Add some idle assets
-        asset.mint(address(smartAccountWrapper), MAX_AMOUNT / 4);
-        uint256 requestAmount = MAX_AMOUNT / 2; // More than idle
-
-        vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
-        vm.stopPrank();
-
-        // Should withdraw available idle assets and request the remainder
-        assertEq(smartAccountWrapper.idleAssets(), 0);
-        assertEq(smartAccountWrapper.pendingWithdrawals(), requestAmount - MAX_AMOUNT / 4);
-        assertNotEq(withdrawKey, bytes32(0));
     }
 
     function test_RequestRedeemWithIdleAssets() public afterDeposit(MAX_AMOUNT) {
         // Add some idle assets
         asset.mint(address(smartAccountWrapper), MAX_AMOUNT / 2);
-        uint256 maxRedeem = smartAccountWrapper.maxRedeem(user);
-        uint256 shares = maxRedeem / 4; // Use maxRedeem instead of userShares
+        uint256 shares = MAX_AMOUNT / 4;
 
         vm.startPrank(user);
         uint256 requestId = smartAccountWrapper.requestRedeem(shares, user, user);
         vm.stopPrank();
 
+        // Async request created; idle assets cover obligations so pendingWithdrawals = 0
+        assertNotEq(requestId, 0);
         assertEq(smartAccountWrapper.pendingWithdrawals(), 0);
-        assertEq(requestId, 0);
     }
 
     function test_transmitDeallocatedAssets() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
         vm.stopPrank();
 
         // Process the withdrawal request
@@ -399,7 +342,7 @@ contract SmartAccountWrapperTest is Test {
     function test_forceTransmitDeallocatedAssets() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
         vm.stopPrank();
 
         // Transfer tokens from smartAccount to wrapper (simulating deallocation)
@@ -416,7 +359,7 @@ contract SmartAccountWrapperTest is Test {
     function test_ClaimAfterProcessing() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.startPrank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
         vm.stopPrank();
 
         // Process the withdrawal request
@@ -429,13 +372,99 @@ contract SmartAccountWrapperTest is Test {
         assertEq(smartAccountWrapper.isClaimed(withdrawKey), true);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                    CLAIM AFTER LOSS / GAIN TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_ClaimAfterLoss_PaysReducedAmount() public afterDeposit(MAX_AMOUNT) {
+        uint256 requestAmount = MAX_AMOUNT / 10; // 10,000e18
+
+        // 1. Request redeem — shares burned, async request created
+        vm.prank(user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
+
+        // 2. Process: smart account sends tokens back
+        _processWithdrawRequest(requestAmount);
+        assertEq(smartAccountWrapper.isClaimable(withdrawKey), true);
+
+        // 3. Simulate 50% loss on remaining allocated assets
+        //    allocatedAssets was MAX_AMOUNT - requestAmount = 90,000e18
+        //    Report only half: 45,000e18
+        uint256 allocatedAfterProcess = MAX_AMOUNT - requestAmount;
+        uint256 lossyAllocated = allocatedAfterProcess / 2;
+        smartAccountWrapper.forceTransmitAllocatedAssets(lossyAllocated);
+
+        // Share price dropped: totalAssets = wrapperBalance(10k) + allocated(45k) - outstanding(10k) = 45k
+        // totalSupply = 90k shares → price = 0.5
+        uint256 expectedShareValue = smartAccountWrapper.convertToAssets(requestAmount);
+        assertLt(expectedShareValue, requestAmount, "share value should be less than requestedAssets");
+
+        // 4. Claim — should get min(requestedAssets, convertToAssets(requestedShares))
+        uint256 balBefore = asset.balanceOf(user);
+        vm.prank(user);
+        uint256 claimed = smartAccountWrapper.claim(withdrawKey);
+
+        assertEq(claimed, expectedShareValue, "should pay reduced amount based on share value");
+        assertEq(asset.balanceOf(user), balBefore + expectedShareValue);
+        assertLt(claimed, requestAmount, "claimed should be less than original request");
+    }
+
+    function test_ClaimAfterGain_CappedAtRequestedAssets() public afterDeposit(MAX_AMOUNT) {
+        uint256 requestAmount = MAX_AMOUNT / 10;
+
+        vm.prank(user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
+        _processWithdrawRequest(requestAmount);
+
+        // Simulate 2x gain on remaining allocated assets
+        uint256 allocatedAfterProcess = MAX_AMOUNT - requestAmount;
+        smartAccountWrapper.forceTransmitAllocatedAssets(allocatedAfterProcess * 2);
+
+        // Share price doubled, but payout should be capped at requestedAssets
+        uint256 shareValue = smartAccountWrapper.convertToAssets(requestAmount);
+        assertGt(shareValue, requestAmount, "share value should exceed requestedAssets");
+
+        uint256 balBefore = asset.balanceOf(user);
+        vm.prank(user);
+        uint256 claimed = smartAccountWrapper.claim(withdrawKey);
+
+        // Capped at original requestedAssets — protects remaining shareholders
+        assertEq(claimed, requestAmount, "should cap at requestedAssets");
+        assertEq(asset.balanceOf(user), balBefore + requestAmount);
+    }
+
+    function testFuzz_ClaimAfterLoss(uint256 lossPercent) public afterDeposit(MAX_AMOUNT) {
+        // lossPercent: 1-99% loss on allocated assets
+        lossPercent = bound(lossPercent, 1, 99);
+        uint256 requestAmount = MAX_AMOUNT / 10;
+
+        vm.prank(user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
+        _processWithdrawRequest(requestAmount);
+
+        // Apply loss
+        uint256 allocatedAfterProcess = MAX_AMOUNT - requestAmount;
+        uint256 lossyAllocated = allocatedAfterProcess * (100 - lossPercent) / 100;
+        smartAccountWrapper.forceTransmitAllocatedAssets(lossyAllocated);
+
+        uint256 shareValue = smartAccountWrapper.convertToAssets(requestAmount);
+        uint256 expectedPayout = shareValue < requestAmount ? shareValue : requestAmount;
+
+        uint256 balBefore = asset.balanceOf(user);
+        vm.prank(user);
+        uint256 claimed = smartAccountWrapper.claim(withdrawKey);
+
+        assertEq(claimed, expectedPayout, "payout = min(requestedAssets, currentShareValue)");
+        assertEq(asset.balanceOf(user), balBefore + expectedPayout);
+    }
+
     function test_MultipleWithdrawRequests() public afterDeposit(MAX_AMOUNT) {
         uint256 request1 = MAX_AMOUNT / 10;
         uint256 request2 = MAX_AMOUNT / 20;
 
         vm.startPrank(user);
-        bytes32 withdrawKey1 = smartAccountWrapper.requestWithdraw(request1, user, user);
-        bytes32 withdrawKey2 = smartAccountWrapper.requestWithdraw(request2, user, user);
+        bytes32 withdrawKey1 = bytes32(smartAccountWrapper.requestRedeem(request1, user, user));
+        bytes32 withdrawKey2 = bytes32(smartAccountWrapper.requestRedeem(request2, user, user));
         vm.stopPrank();
 
         assertEq(smartAccountWrapper.pendingWithdrawals(), request1 + request2);
@@ -462,7 +491,7 @@ contract SmartAccountWrapperTest is Test {
         vm.stopPrank();
 
         vm.startPrank(spender);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
         vm.stopPrank();
 
         assertNotEq(withdrawKey, bytes32(0));
@@ -729,13 +758,6 @@ contract SmartAccountWrapperTest is Test {
         vm.stopPrank();
     }
 
-    function testRevert_RequestWithdrawWhenPaused() public afterDeposit(MAX_AMOUNT) {
-        smartAccountWrapper.pause();
-        vm.prank(user);
-        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
-        smartAccountWrapper.requestWithdraw(1000, user, user);
-    }
-
     function testRevert_RequestRedeemWhenPaused() public afterDeposit(MAX_AMOUNT) {
         smartAccountWrapper.pause();
         vm.prank(user);
@@ -753,11 +775,6 @@ contract SmartAccountWrapperTest is Test {
         assertEq(smartAccountWrapper.maxMint(user), 0);
     }
 
-    function test_MaxRequestWithdraw_ReturnsZeroWhenPaused() public afterDeposit(MAX_AMOUNT) {
-        smartAccountWrapper.pause();
-        assertEq(smartAccountWrapper.maxRequestWithdraw(user), 0);
-    }
-
     function test_MaxRequestRedeem_ReturnsZeroWhenPaused() public afterDeposit(MAX_AMOUNT) {
         smartAccountWrapper.pause();
         assertEq(smartAccountWrapper.maxRequestRedeem(user), 0);
@@ -766,7 +783,7 @@ contract SmartAccountWrapperTest is Test {
     function test_ClaimStillWorksWhenPaused() public afterDeposit(MAX_AMOUNT) {
         uint256 requestAmount = MAX_AMOUNT / 10;
         vm.prank(user);
-        bytes32 withdrawKey = smartAccountWrapper.requestWithdraw(requestAmount, user, user);
+        bytes32 withdrawKey = bytes32(smartAccountWrapper.requestRedeem(requestAmount, user, user));
         _processWithdrawRequest(requestAmount);
 
         // Pause after request is claimable

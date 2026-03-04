@@ -90,7 +90,6 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error SA__ExceededMaxRequestWithdraw(address owner, uint256 assets, uint256 maxAllowed);
     error SA__ExceededMaxRequestRedeem(address owner, uint256 shares, uint256 maxAllowed);
     error SA__NotClaimable(bytes32 withdrawKey);
     error SA__NotAuthorized();
@@ -202,14 +201,6 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
     /**
      * @inheritdoc ISemiAsyncRedeemVault
      */
-    function maxRequestWithdraw(address owner) public view virtual returns (uint256) {
-        // User can always request up to their max withdrawable assets; any shortfall becomes pending
-        return convertToAssets(balanceOf(owner));
-    }
-
-    /**
-     * @inheritdoc ISemiAsyncRedeemVault
-     */
     function maxRequestRedeem(address owner) public view virtual returns (uint256) {
         // User can request to redeem up to their shares; any shortfall in assets becomes pending
         return balanceOf(owner);
@@ -283,25 +274,6 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
     }
 
     /**
-     * @dev DEPRECATED: Use requestRedeem with ERC-7540 interface instead.
-     * @inheritdoc ISemiAsyncRedeemVault
-     */
-    function requestWithdraw(uint256 assets, address receiver, address owner)
-        public
-        virtual
-        returns (bytes32 withdrawKey)
-    {
-        // Enforce requestable limit
-        uint256 maxRequestAssets = maxRequestWithdraw(owner);
-        if (assets > maxRequestAssets) revert SA__ExceededMaxRequestWithdraw(owner, assets, maxRequestAssets);
-
-        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
-
-        // For backward compat: receiver serves as both controller and receiver
-        return _processRequest(assets, shares, receiver, receiver, owner);
-    }
-
-    /**
      * @notice Requests to redeem a specific amount of vault shares (ERC-7540 compliant)
      * @dev Semi-async hybrid workflow:
      * - The specified shares are burned from the owner's balance
@@ -346,7 +318,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         return caller == controller || isOperator(controller, caller);
     }
 
-    /// @dev requestWithdraw/requestRedeem common workflow.
+    /// @dev Internal workflow for creating an async redeem request.
     function _requestWithdraw(
         address caller,
         address controller,
@@ -419,7 +391,8 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
         // Mark claimed first to prevent reentrancy drain
         request.isClaimed = true;
 
-        uint256 amount = request.requestedAssets;
+        uint256 amount =
+            Math.min(request.requestedAssets, _convertToAssets(request.requestedShares, Math.Rounding.Floor));
 
         // Account claimed amount against fulfilled
         $.cumulativeClaimedAssets += amount;
