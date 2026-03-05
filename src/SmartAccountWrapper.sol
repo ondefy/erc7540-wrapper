@@ -155,7 +155,7 @@ contract SmartAccountWrapper is
     }
 
     function forceTransmitDeallocatedAssets(uint256 remainingAllocatedAssets) public onlyOwner {
-        if (remainingAllocatedAssets > allocatedAssets() || pendingWithdrawals() > 0) {
+        if (remainingAllocatedAssets > allocatedAssets() && pendingWithdrawals() > 0) {
             revert SA__PendingWithdrawals();
         }
         _getSmartAccountWrapperStorage().allocatedAssets = remainingAllocatedAssets;
