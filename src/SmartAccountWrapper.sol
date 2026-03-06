@@ -149,7 +149,6 @@ contract SmartAccountWrapper is
     //////////////////////////////////////////////////////////////*/
 
     function forceTransmitAllocatedAssets(uint256 assets) public onlyOwner {
-        if (pendingWithdrawals() > 0) revert SA__PendingWithdrawals();
         _getSmartAccountWrapperStorage().allocatedAssets = assets;
         emit AllocatedAssetsTransmitted(assets);
     }
@@ -163,7 +162,6 @@ contract SmartAccountWrapper is
     }
 
     function transmitAllocatedAssets(uint256 assets) public onlySmartAccount {
-        if (pendingWithdrawals() > 0) revert SA__PendingWithdrawals();
         _getSmartAccountWrapperStorage().allocatedAssets = assets;
         emit AllocatedAssetsTransmitted(assets);
     }

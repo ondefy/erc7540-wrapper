@@ -395,7 +395,7 @@ abstract contract SemiAsyncRedeemVault is Initializable, ERC4626Upgradeable, Non
             Math.min(request.requestedAssets, _convertToAssets(request.requestedShares, Math.Rounding.Floor));
 
         // Account claimed amount against fulfilled
-        $.cumulativeClaimedAssets += amount;
+        $.cumulativeClaimedAssets += request.requestedAssets;
 
         _claimFromStrategies();
 
