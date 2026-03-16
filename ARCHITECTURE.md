@@ -70,31 +70,48 @@ graph TB
 ## 2. Roles & Trust Model
 
 ```mermaid
-graph LR
-    subgraph "High Trust"
-        OWNER["Owner (Gnosis Safe Multisig)<br/>──────────<br/>• forceTransmit*<br/>• allocateAssets<br/>• setSmartAccount<br/>• upgrade beacon"]
+graph TB
+    subgraph TRUST_HIGH ["🔴 High Trust"]
+        MULTISIG["Gnosis Safe Multisig<br/>──────────<br/>• forceTransmit*<br/>• setSmartAccount<br/>• allocateAssets<br/>• pause / unpause<br/>• upgrade beacon"]
     end
 
-    subgraph "Medium Trust"
-        SA_ROLE["Smart Account (Zyfai)<br/>──────────<br/>• transmitAllocatedAssets<br/>• transmitDeallocatedAssets"]
-        INDEXER["Indexer<br/>──────────<br/>• Fulfills withdrawal requests<br/>• Deploys idle assets<br/>• Syncs NAV"]
+    subgraph TRUST_MED ["🟡 Medium Trust"]
+        VAULT["SmartAccountWrapper (Vault)<br/>──────────<br/>• ERC-4626 / ERC-7540<br/>• Manages shares & requests<br/>• Tracks allocatedAssets<br/>• ERC-1271 signature delegation"]
+        
+        SMART_ACCOUNT["Zyfai Smart Account<br/>──────────<br/>• Holds allocated assets<br/>• Executes DeFi strategies<br/>• transmitAllocatedAssets<br/>• transmitDeallocatedAssets"]
+        
+        INDEXER["Indexer (Off-chain)<br/>──────────<br/>• Polls pendingWithdrawals<br/>• Fulfills withdrawals via SA<br/>• Syncs NAV (PnL)<br/>• Reallocates idle assets"]
     end
 
-    subgraph "No Trust Required"
-        USER["User<br/>──────────<br/>• deposit / withdraw<br/>• requestWithdraw / requestRedeem<br/>• claim<br/>• setOperator"]
-        OPERATOR["ERC-7540 Operator<br/>──────────<br/>• Act on behalf of controller<br/>(requires explicit approval)"]
+    subgraph TRUST_LOW ["🟢 No Trust Required"]
+        USER["User<br/>──────────<br/>• deposit / mint<br/>• requestRedeem / requestWithdraw<br/>• claim<br/>• setOperator"]
+        
+        OPERATOR["ERC-7540 Operator<br/>──────────<br/>• Aggregators, routers<br/>• Acts on behalf of controller<br/>(requires explicit approval)"]
     end
 
-    OWNER -->|controls| SA_ROLE
-    OWNER -->|controls| INDEXER
-    INDEXER -->|calls| SA_ROLE
-    USER -->|approves| OPERATOR
+    %% Ownership chain
+    MULTISIG -->|"owns"| VAULT
+    VAULT -->|"owns"| SMART_ACCOUNT
+    
+    %% Indexer interactions
+    MULTISIG -.->|"controls"| INDEXER
+    INDEXER -.->|"calls transmit*"| SMART_ACCOUNT
+    INDEXER -.->|"monitors"| VAULT
+    
+    %% User interactions
+    USER -->|"deposit / withdraw"| VAULT
+    USER -->|"approves"| OPERATOR
+    OPERATOR -->|"acts on behalf"| VAULT
+    
+    %% Asset flow
+    VAULT ==>|"assets flow"| SMART_ACCOUNT
 
-    style OWNER fill:#ffcdd2
-    style SA_ROLE fill:#fff9c4
-    style INDEXER fill:#fff9c4
-    style USER fill:#c8e6c9
-    style OPERATOR fill:#c8e6c9
+    style MULTISIG fill:#ffcdd2,stroke:#c62828
+    style VAULT fill:#e3f2fd,stroke:#1565c0
+    style SMART_ACCOUNT fill:#fff3e0,stroke:#ef6c00
+    style INDEXER fill:#f3e5f5,stroke:#7b1fa2
+    style USER fill:#c8e6c9,stroke:#2e7d32
+    style OPERATOR fill:#c8e6c9,stroke:#2e7d32
 ```
 
 **Trust assumptions:**
