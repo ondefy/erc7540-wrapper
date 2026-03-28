@@ -32,7 +32,8 @@ The Semi-Async Vault is an **ERC-7540 compliant async redemption vault** that wr
 - Deposits are **synchronous** — assets are immediately forwarded to the Zyfai smart account.
 - Withdrawals are **asynchronous** — queued for async fulfillment.
 - The vault is the **sole owner** of the Zyfai smart account, giving it full custody of allocated assets.
-- A **centralized indexer** manages withdrawal fulfillment, idle asset allocation, and PnL synchronization.
+- A **centralized indexer** manages withdrawal fulfillment and idle asset reallocation.
+- A **centralized oracle service** syncs the NAV (PnL) by providing the value reported in `transmitAllocatedAssets` and `transmitDeallocatedAssets`.
 - The vault is **ERC-4626 backward compatible** for standard integrations.
 
 ```mermaid
@@ -42,8 +43,9 @@ graph TB
         U2[Withdrawer]
     end
 
-    subgraph Indexer
-        BE[SmartWrapperOperator<br/>Centralized Service]
+    subgraph "Centralized Services"
+        BE[Indexer<br/>Automation Engine]
+        ORACLE[Oracle Service<br/>NAV Sync]
     end
 
     subgraph "On-Chain Contracts"
@@ -56,13 +58,16 @@ graph TB
 
     U1 -->|deposit| VAULT
     U2 -->|requestWithdraw / claim| VAULT
-    BE -->|"fulfill withdrawals,<br/>allocate idle"| VAULT
+    BE -->|"fulfill withdrawals,<br/>reallocate idle"| VAULT
+    ORACLE -->|"NAV value"| SA
+    SA -->|"transmitAllocatedAssets /<br/>transmitDeallocatedAssets"| VAULT
     VAULT -->|"assets transferred"| SA
     SA -->|"assets returned"| VAULT
 
     style VAULT fill:#e1f5fe
     style SA fill:#fff3e0
     style BE fill:#f3e5f5
+    style ORACLE fill:#fce4ec
 ```
 
 ---
@@ -71,32 +76,36 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph TRUST_HIGH ["🔴 High Trust"]
+    subgraph TRUST_HIGH ["High Trust"]
         MULTISIG["Gnosis Safe Multisig<br/>──────────<br/>• forceTransmit*<br/>• setSmartAccount<br/>• allocateAssets<br/>• pause / unpause<br/>• upgrade beacon"]
     end
 
-    subgraph TRUST_MED ["🟡 Medium Trust"]
+    subgraph TRUST_MED ["Medium Trust"]
         VAULT["SmartAccountWrapper (Vault)<br/>──────────<br/>• ERC-4626 / ERC-7540<br/>• Manages shares & requests<br/>• Tracks allocatedAssets<br/>• ERC-1271 signature delegation"]
         
         SMART_ACCOUNT["Zyfai Smart Account<br/>──────────<br/>• Holds allocated assets<br/>• Executes DeFi strategies<br/>• transmitAllocatedAssets<br/>• transmitDeallocatedAssets"]
         
-        INDEXER["Indexer (Off-chain)<br/>──────────<br/>• Polls pendingWithdrawals<br/>• Fulfills withdrawals via SA<br/>• Syncs NAV (PnL)<br/>• Reallocates idle assets"]
+        ORACLE["Oracle Service (Off-chain)<br/>──────────<br/>• Syncs NAV at each operation<br/>• Provides value for transmitAllocatedAssets<br/>• Provides value for transmitDeallocatedAssets"]
     end
 
     subgraph TRUST_LOW ["🟢 No Trust Required"]
         USER["User<br/>──────────<br/>• deposit / mint<br/>• requestRedeem / requestWithdraw<br/>• claim<br/>• setOperator"]
         
         OPERATOR["ERC-7540 Operator<br/>──────────<br/>• Aggregators, routers<br/>• Acts on behalf of controller<br/>(requires explicit approval)"]
+        
+        INDEXER["Indexer (Off-chain)<br/>──────────<br/>• Polls pendingWithdrawals<br/>• Fulfills withdrawals via SA<br/>• Reallocates idle assets"]
     end
 
     %% Ownership chain
     MULTISIG -->|"owns"| VAULT
     VAULT -->|"owns"| SMART_ACCOUNT
     
+    %% Oracle interactions
+    ORACLE -.->|"provides NAV value"| SMART_ACCOUNT
+    
     %% Indexer interactions
-    MULTISIG -.->|"controls"| INDEXER
-    INDEXER -.->|"calls transmit*"| SMART_ACCOUNT
-    INDEXER -.->|"monitors"| VAULT
+    INDEXER -.->|"fulfills withdrawals"| SMART_ACCOUNT
+    INDEXER -.->|"monitors & reallocates"| VAULT
     
     %% User interactions
     USER -->|"deposit / withdraw"| VAULT
@@ -109,6 +118,7 @@ graph TB
     style MULTISIG fill:#ffcdd2,stroke:#c62828
     style VAULT fill:#e3f2fd,stroke:#1565c0
     style SMART_ACCOUNT fill:#fff3e0,stroke:#ef6c00
+    style ORACLE fill:#fce4ec,stroke:#c62828
     style INDEXER fill:#f3e5f5,stroke:#7b1fa2
     style USER fill:#c8e6c9,stroke:#2e7d32
     style OPERATOR fill:#c8e6c9,stroke:#2e7d32
@@ -116,11 +126,13 @@ graph TB
 
 **Trust assumptions:**
 
-- **Owner** is a Gnosis Safe multisig. It has full control: can upgrade the vault and reallocate assets. There is **no timelock** on upgrades — the multisig threshold is the sole protection. Users accept this as part of the trust model.
-- **Smart Account** can update `allocatedAssets` via `transmitAllocatedAssets()`.
-- **Indexer** is a centralized service. It is the sole mechanism for fulfilling async withdrawals and syncing NAV.
-- **Users** interact permissionlessly. They can deposit, request withdrawals, and claim fulfilled requests.
-- **ERC-7540 Operators** are approved per-controller for composability (e.g., aggregators, routers acting on behalf of depositors).
+1. **Safe Multisig (Owner)** has full control over the vault: upgrades, asset reallocation, parameter changes. No timelock on upgrades; the multisig threshold is the security boundary. This is a deliberate design choice, and users opt into the multisig's trust model.
+2. **SmartAccountWrapper (Vault)** is the contract integrators and users interact with. ERC-4626 and ERC-7540 compliant. Manages share accounting, tracks the value of deployed assets via `allocatedAssets`, and supports ERC-1271 signature delegation for composability with aggregators, routers, and other ERC-7540 operators acting on behalf of depositors.
+3. **Zyfai Smart Account** is where allocated capital lives and DeFi strategies are executed.
+4. **Oracle Service (Centralized Service):** At each operation (deposit, withdrawal, rebalancing), this service syncs the NAV. When the Zyfai Smart Account executes transactions, the oracle provides the value to be reported back to the Vault via `transmitAllocatedAssets()` (capital out) and `transmitDeallocatedAssets()` (capital back).
+5. **Indexer (Centralized Service)** is the automation engine. Every ~60 seconds, it polls `pendingWithdrawals()`, fulfills them through the Smart Account, and sends requests to reallocate idle capital.
+6. **Users** interact permissionlessly. They can deposit, request withdrawals, and claim fulfilled requests.
+7. **ERC-7540 Operators** are approved per-controller for composability (e.g., aggregators, routers acting on behalf of depositors).
 
 ---
 
@@ -152,19 +164,21 @@ _(pending withdrawals are subtracted because those shares are already burned)_
 
 ## 4. Deposit Flow
 
-Deposits are fully synchronous. The user calls `deposit()` directly on the vault contract. Inside the deposit transaction, `transmitAllocatedAssets()` is called to sync the current NAV before minting shares. After the deposit, the Zyfai smart account asynchronously detects the incoming assets and incorporates them into its active strategies.
+Deposits are fully synchronous. The user calls `deposit()` directly on the vault contract. Inside the deposit transaction, `transmitAllocatedAssets()` is called — using the value provided by the Oracle service — to sync the current NAV before minting shares. After the deposit, the Zyfai smart account asynchronously detects the incoming assets and incorporates them into its active strategies.
 
 ```mermaid
 sequenceDiagram
     actor User
     participant Vault as SmartAccountWrapper
     participant SA as Zyfai Smart Account
+    participant Oracle as Oracle Service
 
     User->>Vault: deposit(assets, receiver)
 
     rect rgb(240, 248, 255)
         Note over Vault: Inside deposit() execution
-        Vault->>Vault: transmitAllocatedAssets(currentBalance)
+        Oracle-->>SA: currentBalance (NAV value)
+        SA->>Vault: transmitAllocatedAssets(currentBalance)
         Note right of Vault: NAV synced — share price is fresh
         Vault->>Vault: Mint shares to receiver<br/>shares = assets × totalSupply / totalAssets
         Vault->>SA: safeTransfer(assets)
@@ -237,20 +251,23 @@ flowchart TD
 
 ## 6. Indexer Loop
 
-The centralized indexer runs a continuous polling loop that manages three responsibilities:
+The centralized indexer runs a continuous polling loop (~60 seconds) that manages two responsibilities: fulfilling pending withdrawals and reallocating idle capital.
 
 ```mermaid
 sequenceDiagram
     participant Indexer as Indexer<br/>(SmartWrapperOperator)
     participant Vault as SmartAccountWrapper
     participant SA as Zyfai Smart Account
+    participant Oracle as Oracle Service
 
-    loop Polling Loop
+    loop Every ~60 seconds
         Note over Indexer: === 1. Check Pending Withdrawals ===
         Indexer->>Vault: pendingWithdrawals()
         alt pendingWithdrawals > 0
             Indexer->>SA: request_withdraw(amount)
             SA-->>Indexer: Assets arrive at operator wallet
+            Indexer->>Oracle: request NAV value
+            Oracle-->>Indexer: remainingAllocated
             Indexer->>Vault: transmitDeallocatedAssets(remainingAllocated)
             Note right of Vault: allocatedAssets = remaining<br/>Vault balance increases<br/>Requests become claimable
         end
@@ -262,12 +279,6 @@ sequenceDiagram
             Vault->>SA: safeTransfer(idleAmount)
             Note right of Vault: allocatedAssets += idleAmount<br/>Idle returns to zero
         end
-
-        Note over Indexer: === 3. PnL Sync ===
-        Indexer->>SA: get_balance()
-        SA-->>Indexer: currentBalance
-        Indexer->>Vault: transmitAllocatedAssets(currentBalance)
-        Note right of Vault: allocatedAssets updated<br/>Share price reflects latest PnL
     end
 ```
 
@@ -311,18 +322,22 @@ flowchart TD
 
 ## 8. PnL Synchronization
 
-The vault does not directly observe yield accrual. Instead, the smart account reports its current balance, and the vault updates `allocatedAssets` accordingly.
+The vault does not directly observe yield accrual. Instead, the **Oracle service** provides the current NAV value at each operation (deposit, withdrawal, rebalancing). The smart account calls `transmitAllocatedAssets()` or `transmitDeallocatedAssets()` with the value supplied by the Oracle.
 
 ```mermaid
 flowchart TD
-    SA_REPORT["Smart account / indexer reports<br/>currentBalance"]
+    ORACLE["Oracle Service<br/>computes current NAV"]
+    ORACLE --> SA_REPORT["Zyfai Smart Account<br/>receives NAV value from Oracle"]
     SA_REPORT --> UPDATE["transmitAllocatedAssets(currentBalance)<br/>──────────<br/>allocatedAssets = currentBalance<br/>Share price updated"]
+    SA_REPORT --> DEALLOC["transmitDeallocatedAssets(remainingAllocated)<br/>──────────<br/>allocatedAssets = remaining<br/>Vault balance increases"]
 
     subgraph "Emergency Override (Owner Only)"
         FORCE["forceTransmitAllocatedAssets(assets)<br/>──────────<br/>Used in hack recovery / migration"]
     end
 
+    style ORACLE fill:#fce4ec
     style UPDATE fill:#c8e6c9
+    style DEALLOC fill:#c8e6c9
     style FORCE fill:#fff9c4
 ```
 
@@ -430,10 +445,11 @@ The vault implements ERC-1271 because it is the **sole owner of the Zyfai smart 
 
 | Tradeoff                         | Description                                                                                                                                         | Mitigation                                                                          |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| **Indexer liveness dependency**  | If the indexer goes offline, no withdrawals can be fulfilled and no PnL syncs occur. There is no timeout or emergency withdrawal path for users.    | Indexer is monitored. Owner multisig can intervene via `forceTransmit*` functions.  |
+| **Indexer liveness dependency**  | If the indexer goes offline, no withdrawals can be fulfilled. There is no timeout or emergency withdrawal path for users.                           | Indexer is monitored. Owner multisig can intervene via `forceTransmit*` functions.  |
+| **Oracle liveness dependency**   | If the oracle service goes offline, NAV cannot be synced and share prices become stale. Deposits and deallocations depend on oracle-provided values. | Oracle is monitored. Owner multisig can force NAV via `forceTransmitAllocatedAssets()`. |
 | **No withdrawal reserve**        | 100% of deposits are allocated. Every withdrawal goes through the async queue unless deallocation overflow created idle assets.                     | Reduces capital inefficiency. Indexer fulfillment is expected to be reasonably fast. |
 | **FIFO whale blocking**          | A large withdrawal request blocks all subsequent requests until fully funded. No max request size exists.                                           | Accepted tradeoff. Indexer can deallocate large amounts in a single operation.      |
-| **Centralized NAV updates**      | Share price only updates when `transmitAllocatedAssets()` is called. Between calls, the NAV is stale.                                              | NAV is synced within deposit calls and by the indexer on each interaction.           |
+| **Centralized NAV updates**      | Share price only updates when `transmitAllocatedAssets()` is called. Between calls, the NAV is stale.                                              | NAV is synced by the Oracle at each operation (deposit, withdrawal, rebalancing).   |
 | **Upgradeable without timelock** | Owner multisig can upgrade the vault implementation instantly with no delay.                                                                        | Trust in multisig signers. Users must evaluate multisig configuration.              |
 | **Opaque strategy risk**         | Strategy composition is not enforced on-chain. Users trust the operator to manage risk appropriately.                                               | Off-chain reporting provides transparency.                                          |
 
