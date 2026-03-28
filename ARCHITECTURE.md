@@ -88,7 +88,7 @@ graph TB
         ORACLE["Oracle Service (Off-chain)<br/>──────────<br/>• Syncs NAV at each operation<br/>• Provides value for transmitAllocatedAssets<br/>• Provides value for transmitDeallocatedAssets"]
     end
 
-    subgraph TRUST_LOW ["🟢 No Trust Required"]
+    subgraph TRUST_LOW ["No Trust Required"]
         USER["User<br/>──────────<br/>• deposit / mint<br/>• requestRedeem / requestWithdraw<br/>• claim<br/>• setOperator"]
         
         OPERATOR["ERC-7540 Operator<br/>──────────<br/>• Aggregators, routers<br/>• Acts on behalf of controller<br/>(requires explicit approval)"]
